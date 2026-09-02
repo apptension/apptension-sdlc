@@ -536,15 +536,18 @@ This matters in three situations that all reduce to the same one:
 
 - the loop is pointed at an existing PR in a fresh session;
 - the session that started it ended and a human resumed it later;
-- a **dispatched** run parked between polls, and its session was closed on idle
-  before anyone answered.
+- a session was closed on idle while the loop was waiting on an answer nobody
+  had given yet.
 
-The third is the one that turns this from a nicety into a requirement. A
-dispatched loop is *expected* to outlive its session — that is what parking
-between polls is for — so a loop whose correctness depends on in-session memory
-is a loop that silently degrades exactly where dispatch was supposed to help.
-Re-deriving costs one extra read per resume and removes the whole class of
-problem, in every harness, without persisting anything to disk.
+The third is the one that turns this from a nicety into a requirement, and it is
+worth knowing the mechanism. **A session closes after roughly fifteen minutes of
+inactivity, and an active poll is not inactivity** — so a loop that keeps
+polling reaches CI's verdict on its own, wherever it is running. What ends a
+session early is silence: a loop that has stopped to ask something and is
+waiting on a person. That answer can arrive long after the session is gone, so a
+loop whose correctness depends on in-session memory degrades exactly where it is
+most needed. Re-deriving costs one extra read per resume and removes the whole
+class of problem, in every harness, without persisting anything to disk.
 
 **Where the PR does not answer the question, say so rather than guess.** A
 resumed loop that cannot tell what a round of feedback was asking, or which of
@@ -553,8 +556,7 @@ could not, and asks. An inferred goal acted on silently is worse than a question
 
 ### Safety rules the loop never breaks
 
-These bind on every path, attended or dispatched, and none of them is a judgment
-call:
+These bind on every path, and none of them is a judgment call:
 
 - **Never make CI green by weakening what it checks.** Deleting an assertion,
   loosening a threshold, skipping a test, or excluding a path turns a red signal
@@ -598,9 +600,9 @@ states, never a silence.
 
 **Stop conditions**, deliberately simple, no auto-idle heuristics: the
 human explicitly says stop; the PR is closed or merged; the session
-ends — with the caveat above that a dispatched loop's session ending is
-not the work ending, and a resumed loop re-derives its state rather than
-starting over.
+ends — with the caveat above that a session ending is not the work
+ending, and a resumed loop re-derives its state rather than starting
+over.
 
 **Non-goals**, mirroring `dev-flow`'s existing ones: never merges; never
 takes the PR out of draft; no force-push or history rewrite — plain

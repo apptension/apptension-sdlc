@@ -41,18 +41,6 @@
       "guest_filable": false
     },
     {
-      "id": "cezar-workflow",
-      "label": "Orchestrator workflow for the development flow",
-      "area": "dev-flow",
-      "source": "task-dispatch.md",
-      "detect": {
-        "kind": "path",
-        "path": ".ai/cezar/workflows/apptension-dev-flow.yaml"
-      },
-      "optional": true,
-      "intent": "A handed-off run follows this repo's own development process and is gated by this repo's own verification commands, rather than by whatever the person dispatching it happened to type."
-    },
-    {
       "id": "dev-flow-bindings",
       "label": "Repo bindings recorded for agents",
       "area": "dev-flow",

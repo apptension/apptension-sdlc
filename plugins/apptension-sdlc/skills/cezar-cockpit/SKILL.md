@@ -14,5 +14,13 @@ return this project's URL before starting another: a second cockpit binds
 a different port and shows an overlapping project list, so both URLs look
 correct and disagree about what is running.
 
+Check the configuration is still in step with the bindings on the way
+past, and say which values differ if it is not — a base branch left
+behind by a `Branching model` change makes runs fork from the wrong
+branch and open pull requests that look correct against it. Report it and
+name `cezar-setup`; open the cockpit either way. This is a door, not a
+gate: runs are launched in Cezar's own interface, and the cockpit is
+opened to answer and watch as much as to start.
+
 Start it in the background. It runs until someone stops it, so a session
 that waits on it never returns.

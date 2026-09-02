@@ -656,50 +656,6 @@ waiting for confirmation of an instruction the human had just given. What
 it did not save: pre-flight, craft, the verification the touched paths
 bind, or anything after the commit.
 
-### Running dispatched
-
-This flow assumes a human in the session. It can also run inside a task
-**dispatched** to an orchestrator, with nobody there to answer. When it
-does, [`./task-dispatch.md`](./task-dispatch.md) governs, and it grants
-exactly **one** override:
-
-**Step 5's confirmation has already been given** — but only when the
-dispatch prompt carries a resolved track. The gate ran at hand-off,
-against this same issue, and a human confirmed the call there. Read the
-track from the prompt, do not re-derive it, and do not wait. With no
-resolved track in the prompt, nothing was confirmed: run the gate here
-and stop for the confirmation exactly as an attended run does.
-
-**Promotion still fires.** The sanction covers the track that was
-confirmed, not the change the work turns out to be. A dispatched run whose
-change leaves the named surface stops; it never re-gates itself into a
-wider track on its own authority.
-
-**Nothing else is waived** — not pre-flight, the craft checklist, TDD,
-verification, the commit convention, or the PR body.
-
-**A stop is still a stop.** Every place this flow says to stop and ask, a
-dispatched run still stops: it ends its turn without claiming completion,
-which the orchestrator surfaces as a task needing attention, and a human
-answers whenever they get to it. Nobody watching is not permission to
-guess.
-
-**Re-entry after this flow already opened the PR is a resume, not a stop.**
-An orchestrator that gates a run on its own verification step will send the
-run back here when that step fails — and by then step 9 has opened the pull
-request, so step 2's "no pull request already attached" is now true of the
-flow's *own* work. Read as a stop, that check would make the repair
-unreachable: every failed verification would end the run rather than fix it.
-
-So when re-entry finds a pull request attached to this issue **from this
-branch**, the flow does not restart and does not stop. It hands off to
-`pr-checks`, which is written for exactly this — an existing PR, something
-red, state re-derived from the PR itself — and which is where the repair
-belongs anyway.
-
-A pull request attached to the issue from **any other branch** is the case
-step 2 was written for, and still stops.
-
 ### Craft checklist is never skipped
 
 The design gate decides whether to write a **spec and plan**. It does
@@ -906,10 +862,9 @@ Then start the `pr-checks` skill's monitor loop in this same session
 (see "After the PR"). The PR stays in draft; taking it out of draft is a
 human action.
 
-A dispatched run starts that loop too. It signals to its orchestrator that
-it is still working on its own downstream work rather than waiting on a
-human, so the run parks between polls instead of holding a slot or looking
-abandoned. Nothing about the loop itself changes.
+The loop runs to CI's verdict. Opening the pull request is not where this
+flow ends — the draft PR is where the work becomes reviewable, and the
+watching and fixing that follow are the same session's job.
 
 ## After the PR
 

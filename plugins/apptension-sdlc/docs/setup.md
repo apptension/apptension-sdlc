@@ -492,7 +492,7 @@ row's value when the thing it names changes, rather than its label.
 | Commit convention | <convention> |
 | Specs and plans | `<specs path>`, `<plans path>` |
 | Board | **<board name>**, <owner kind> `<owner>`, project #<number> |
-| Task orchestrator | <orchestrator> — `<dispatch command>`, workflows in `<workflow dir>` |
+| Task orchestrator | <orchestrator> — `<dispatch command>`, config in `<config path>` |
 ```
 
 The example is placeholders on purpose. `Board` in particular is the row
@@ -808,7 +808,7 @@ type an orchestrator when exactly one is supported invites a value the
 process cannot act on, and costs a round trip to reach the answer the
 question already knew. A name outside the set is still accepted and
 recorded verbatim — the row is deliberately not Cezar-specific — but
-`task-dispatch` will stop on it until a process supports it, and the gate
+nothing here can configure it until a process supports it, and the gate
 says so rather than letting it look configured.
 
 ##### `none` is an answer, and `unknown` is not
@@ -857,10 +857,9 @@ for you to land through this repo's normal flow.
 The 4 issues above are filed in this repo's tracker.
 
 And this repo's task orchestrator, Cezar, is configured on this machine:
-.ai/cezar/ is written from those bindings, its base branch taken from the
-branching model above and its verification check from the verification
-commands above. That directory is git-ignored, so it does not arrive with
-a clone. Both files are shown before they are written.
+.ai/cezar/config.json is written from those bindings, its base branch
+taken from the branching model above. That directory is git-ignored, so it
+does not arrive with a clone. The file is shown before it is written.
 
 Write the CLAUDE.md table, file these 4, and configure Cezar? (yes /
 drop some / edit a title / no — enter accepts yes)
@@ -875,7 +874,7 @@ covers both the developer who just answered the question and every
 developer who clones afterwards and finds the row already there. A row
 reading `none`, `unknown`, or absent leaves the prompt at its two original
 effects and its original wording, and so does a machine already configured
-and in step with the bindings.
+and already equal to what the bindings derive.
 
 The sentence deliberately does not say *because you named Cezar*. Most of
 the people who see it will not have named anything; they will have cloned
@@ -1064,14 +1063,13 @@ every bindings row, each in exactly one place:
 **Applicability is decided before this grouping, not inside it.** An entry
 whose precondition does not hold in this repo is *not applicable*, and an
 entry that is not applicable is neither `Present` nor a gap — it is not
-reported at all. The orchestrator workflow entry is the worked example: it
-only means anything once the `Task orchestrator` row names a supported
-orchestrator, so in a repo whose row is `none`, absent, or `unknown` a
-missing workflow is not a finding. Running it through the generic
-`optional:` path instead would report a missing orchestrator workflow to a
-team that declined an orchestrator, on every run — which is the nagging the
-`none` answer exists to end. An entry that declares a precondition says so;
-one that does not is applicable everywhere, which is the ordinary case.
+reported at all. A checklist probe cannot express a precondition — it only
+looks for the artifact — so an entry that has one records it on the page
+that declares it, and this step honours what that page says. An entry
+declaring none is applicable everywhere, which is the ordinary case. The
+distinction earns its place because reporting a gap the repo's own answers
+already rule out is nagging rather than auditing, and it is the fastest way
+to teach an operator to stop reading the summary.
 
 | Group | What it holds |
 |---|---|
@@ -1123,14 +1121,24 @@ machine states, and setup does something different in each:
 | This machine | What setup does |
 |---|---|
 | No orchestrator configuration | Configure it. This is every developer after the first |
-| Configured, and in step with the bindings | Nothing. Report it as already configured |
-| Configured, but its base branch or check command no longer matches the bindings | Reconfigure, and report which values moved |
+| Configured, and already equal to what the bindings derive | Nothing. Report it as already configured |
+| Configured, but different from what the bindings derive | Reconfigure, and report which values moved |
 
 The middle row keeps a re-run cheap and quiet. The last one exists because
-these values are copies: when `Branching model` or `Verification` changes,
-every already-configured machine is silently stale until something notices,
-and a stale base branch opens pull requests against the wrong branch
-without failing.
+the configuration holds copies: when a binding they derive from changes,
+every already-configured machine is silently out of step until something
+notices, and a stale base branch opens pull requests against the wrong
+branch without failing.
+
+**Compare against the derived target, never against a list of fields.**
+The test is whether the existing configuration equals what
+[`./task-dispatch.md`](./task-dispatch.md)'s procedure would write now — so
+a field that procedure starts deriving is covered here the day it is added,
+with nothing to update in this step. Naming the fields instead is how this
+check rots: it would keep reporting a machine as in step because the one
+value it still knows to compare happens to match, and the configuration
+would stay behind in every other respect. That failure is silent in the way
+this whole section is written to avoid.
 
 Adoption is one conversation. A developer who answers "yes, Cezar" has
 made the decision; asking them afterwards to go and run a second skill is
@@ -1152,19 +1160,15 @@ reports:
 | `Branching model` is `unknown`, so no base branch can be derived | Write nothing, and report that the row has to be answered first — a guessed base branch is the one failure here that is silent |
 
 **Setup does not run the repo's verification suite**, here or anywhere in
-this step. Writing two config files does not justify a full lint-and-test
+this step. Writing one config file does not justify a full lint-and-test
 run, the result would expire almost immediately, and it would measure the
-operator's working tree rather than the branch a dispatched run forks
-from. The check command is echoed in the approval so the human sees what
-will gate their runs; the suite itself is exercised by the first
-dispatched run, where a failure arrives with its own output. See
-[`./task-dispatch.md`](./task-dispatch.md), "When every dispatched run
-fails at the check step".
+operator's working tree rather than the branch a run forks from. The suite
+is exercised by [`./dev-flow.md`](./dev-flow.md) step 7 and by CI on the
+pull request, where a failure arrives with its own output.
 
 `cezar-setup` remains a skill in its own right, for exactly the case this
-step cannot cover: re-running it when `Branching model` or `Verification`
-later changes, so Cezar's copy of those values stops drifting from the
-bindings that own them.
+step cannot cover: re-running it when `Branching model` later changes, so
+Cezar's copy of that value stops drifting from the binding that owns it.
 
 ### The summary is the operator's, not this page's
 
