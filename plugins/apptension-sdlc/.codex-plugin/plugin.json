@@ -1,0 +1,23 @@
+{
+  "name": "apptension-sdlc",
+  "version": "0.9.84",
+  "description": "Apptension SDLC processes as skills plus bundled docs: how we work, authored once and consumed by both AI agents and the documentation site.",
+  "author": {
+    "name": "Apptension"
+  },
+  "license": "UNLICENSED",
+  "keywords": [
+    "apptension",
+    "sdlc",
+    "process",
+    "docs"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Apptension SDLC",
+    "shortDescription": "Apptension SDLC processes — skills plus bundled docs.",
+    "capabilities": [
+      "Read"
+    ]
+  }
+}

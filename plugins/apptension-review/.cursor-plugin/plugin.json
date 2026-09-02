@@ -1,0 +1,17 @@
+{
+  "name": "apptension-review",
+  "displayName": "Apptension Review",
+  "version": "0.7.1",
+  "description": "Apptension review skills — methodical assessments of code, infrastructure, and security, plus a full project audit with scored, comparable reports. Findings and reports only; no code changes.",
+  "author": {
+    "name": "Apptension"
+  },
+  "license": "UNLICENSED",
+  "keywords": [
+    "apptension",
+    "review",
+    "code-review",
+    "code-quality"
+  ],
+  "skills": "./skills/"
+}

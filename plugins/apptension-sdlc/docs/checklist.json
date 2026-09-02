@@ -1,0 +1,157 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "area-labels",
+      "label": "An area taxonomy applied to issues",
+      "area": "issue-intake",
+      "source": "issue-authoring.md",
+      "detect": {
+        "kind": "labels",
+        "labels": [
+          "getting-started",
+          "foundation",
+          "dev-flow",
+          "ci",
+          "issue-intake",
+          "pm",
+          "other"
+        ],
+        "min_count": 3
+      },
+      "intent": "Every issue is tagged with the area of the system or process it touches, using a taxonomy the repo defines for itself. That keeps issues filterable and groupable by area, gives label-picking automation an existing set to choose from, and keeps a project board's columns or swimlanes meaningful instead of one undifferentiated backlog."
+    },
+    {
+      "id": "automated-review-workflow",
+      "label": "Automated code review on pull requests",
+      "area": "ci",
+      "source": "pr-checks.md",
+      "detect": {
+        "kind": "matches",
+        "matches": "claude-code-action|openai/codex-action|coderabbit|reviewdog|pr-agent",
+        "in": ".github/workflows"
+      },
+      "confirm": true,
+      "intent": "Every pull request gets an automated first-pass code review before a human looks at it, surfacing likely issues early so reviewer time goes to judgment calls a machine cannot make.",
+      "grants": [
+        "Read access to pull requests for an analysis job that calls the hosting API, plus write access isolated to the trusted publisher job — the analysis has to read the PR and the publisher has to post its findings, but the model-provider credential must never share a job with write authority.",
+        "An allowed-tools scope limited to exactly the commands the review step issues (e.g. viewing a PR, diffing a PR, checking auth, making an authenticated API call) — never a blanket shell allowance, since an unscoped shell tool can do far more than review.",
+        "The model-provider credential the review step calls (e.g. an API key), scoped to this workflow only."
+      ],
+      "guest_filable": false
+    },
+    {
+      "id": "cezar-workflow",
+      "label": "Orchestrator workflow for the development flow",
+      "area": "dev-flow",
+      "source": "task-dispatch.md",
+      "detect": {
+        "kind": "path",
+        "path": ".ai/cezar/workflows/apptension-dev-flow.yaml"
+      },
+      "optional": true,
+      "intent": "A handed-off run follows this repo's own development process and is gated by this repo's own verification commands, rather than by whatever the person dispatching it happened to type."
+    },
+    {
+      "id": "dev-flow-bindings",
+      "label": "Repo bindings recorded for agents",
+      "area": "dev-flow",
+      "source": "dev-flow.md",
+      "detect": {
+        "kind": "heading",
+        "heading": "### Dev flow bindings",
+        "in": "CLAUDE.md"
+      },
+      "writes": true,
+      "intent": "Every repo-agnostic step an agent follows has, in one place, the concrete values it cannot otherwise know — default branch, the branch feature work starts from and lands on, verification commands, commit convention, board identifiers — so agents stop guessing them or hard-coding them separately into each step."
+    },
+    {
+      "id": "docs-drift-workflow",
+      "label": "Check that process docs keep up with process changes",
+      "area": "ci",
+      "source": "sdlc-docs-check.md",
+      "detect": {
+        "kind": "matches",
+        "matches": "sdlc-docs",
+        "in": ".github/workflows"
+      },
+      "optional": true,
+      "intent": "Every pull request that changes how the development process behaves gets checked for whether the process documentation was updated to match, so the written process doesn't quietly drift out of sync with what the automation actually does while still looking current.",
+      "grants": [
+        "Read-only file access to the repo checkout, plus write access scoped to a single pre-created verdict file and nothing else — so even a successful prompt injection from the reviewed pull request's own content can overwrite only that one file, never the docs, the workflow files, or anything else in the checkout.",
+        "No shell access at all — the pull request's diff, title, and body are fetched into files by the workflow itself before the check runs, rather than the check reaching for a shell command to fetch them, since a shell tool's own flags can leak secrets past a command-level allow-rule in ways the rule can't see.",
+        "No permission to comment, label, or push anywhere — the check's only output is the contents of that one verdict file."
+      ]
+    },
+    {
+      "id": "intake-workflow",
+      "label": "Automatic triage of newly opened issues",
+      "area": "issue-intake",
+      "source": "issue-intake.md",
+      "detect": {
+        "kind": "matches",
+        "matches": "issues:|issue_comment:",
+        "in": ".github/workflows"
+      },
+      "confirm": true,
+      "intent": "Every newly opened issue is automatically checked against existing open issues for a duplicate and labeled from the repo's own label set, so a human doesn't have to start triage from a blank slate.",
+      "grants": [
+        "Read-only access to view, list, and search issues — needed to compare a new issue against everything already open.",
+        "Permission to close an issue and to edit its labels, scoped to the single issue number that triggered the run only, never a bare glob — so a duplicate-detection routine cannot be redirected by the issue's own content into acting on a different issue.",
+        "Permission to list the repo's existing labels, but not to create or delete one — the routine may only apply a label that already exists, never invent a new one."
+      ],
+      "guest_filable": false
+    },
+    {
+      "id": "issue-template",
+      "label": "Structured issue template",
+      "area": "issue-intake",
+      "source": "issue-authoring.md",
+      "detect": {
+        "kind": "path",
+        "path": ".github/ISSUE_TEMPLATE/*.y*ml"
+      },
+      "intent": "A new issue captures the context, the concrete change, and a verifiable definition of done before work starts, instead of leaving whoever picks it up to reconstruct that from a blank text box."
+    },
+    {
+      "id": "project-board",
+      "label": "Project board under the repo's owner",
+      "area": "foundation",
+      "source": "dev-flow.md",
+      "detect": {
+        "kind": "board"
+      },
+      "optional": true,
+      "intent": "What's in progress, what's in review, and what's done is visible at a glance, without reading through every open issue and pull request to reconstruct it."
+    },
+    {
+      "id": "task-orchestrator",
+      "label": "Task orchestrator recorded in the repo bindings",
+      "area": "dev-flow",
+      "source": "task-dispatch.md",
+      "detect": {
+        "kind": "matches",
+        "matches": "\\|\\s*Task orchestrator\\s*\\|",
+        "in": "CLAUDE.md"
+      },
+      "optional": true,
+      "intent": "A developer can hand an issue off to an agent that takes it to a draft pull request without holding a session open, instead of every issue needing someone present for the whole of its run."
+    },
+    {
+      "id": "verification-workflow",
+      "label": "Verification suite running on every pull request",
+      "area": "ci",
+      "source": "pr-checks.md",
+      "detect": {
+        "kind": "matches",
+        "matches": "pull_request(_target)?:",
+        "in": ".github/workflows"
+      },
+      "confirm": true,
+      "intent": "Every pull request runs the repo's own build, lint, and test commands before a human reviews it, so mechanical failures are caught automatically instead of costing reviewer time or slipping into the default branch unnoticed.",
+      "grants": [
+        "Read-only checkout access to build and run the repo's own commands — this workflow only reports pass/fail status, so it needs no write scope to the repository, its issues, or its pull requests."
+      ]
+    }
+  ]
+}

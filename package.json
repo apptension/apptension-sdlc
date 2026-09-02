@@ -1,0 +1,25 @@
+{
+  "name": "apptension-sdlc-toolkit",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Apptension's public plugin marketplace — SDLC processes, code and infrastructure review, E2E test generation, and frontend craft, as installable plugins for Claude Code, Cursor, Codex, OpenCode, and pi.",
+  "main": ".opencode/plugins/apptension-dev.js",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./.pi/extensions/apptension-dev.ts"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/apptension/apptension-sdlc.git"
+  },
+  "homepage": "https://github.com/apptension/apptension-sdlc",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  }
+}

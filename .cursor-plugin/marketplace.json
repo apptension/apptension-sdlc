@@ -1,0 +1,75 @@
+{
+  "name": "apptension-sdlc",
+  "displayName": "Apptension SDLC Toolkit",
+  "owner": {
+    "name": "Apptension",
+    "email": "dev@apptension.com"
+  },
+  "metadata": {
+    "description": "Apptension's public plugin marketplace — SDLC processes, code and infrastructure review, E2E test generation, and frontend craft, as installable plugins for Claude Code, Cursor, Codex, OpenCode, and pi."
+  },
+  "plugins": [
+    {
+      "name": "apptension-e2e-testing",
+      "source": "./plugins/apptension-e2e-testing",
+      "description": "Apptension E2E testing — generates Playwright end-to-end test specs from a ticket's description, unit tests, and a testing-guide doc, then verifies they run.\n",
+      "category": "testing",
+      "tags": [
+        "e2e",
+        "playwright",
+        "testing"
+      ]
+    },
+    {
+      "name": "apptension-frontend-craft",
+      "source": "./plugins/apptension-frontend-craft",
+      "description": "Award-informed product experience skills for AI coding agents: complete UI states, interaction craft, supporting imagery, forms, polish passes, and anti-slop visual design. Complements Superpowers and Apptension SDLC so frontend work ships calm, original, and complete — not template-blank.\n",
+      "category": "workflow",
+      "tags": [
+        "ux",
+        "design",
+        "craft",
+        "ui",
+        "frontend",
+        "recommended"
+      ]
+    },
+    {
+      "name": "apptension-review",
+      "source": "./plugins/apptension-review",
+      "description": "Apptension review skills — methodical assessments of code, infrastructure, and security, plus a full project audit with scored, comparable reports. Findings and reports only; no code changes.\n"
+    },
+    {
+      "name": "apptension-sdlc",
+      "source": "./plugins/apptension-sdlc",
+      "description": "Apptension SDLC processes as skills plus bundled docs: how we work, authored once and consumed by both AI agents and the documentation site.\n",
+      "category": "workflow",
+      "tags": [
+        "sdlc",
+        "process",
+        "docs",
+        "methodology"
+      ]
+    },
+    {
+      "name": "superpowers",
+      "repo": "https://github.com/obra/superpowers.git"
+      "description": "Complete software-development methodology for AI coding agents: TDD, systematic debugging, brainstorming, plan-driven execution, and ~50 composable skills.\n",
+      "author": {
+        "name": "Jesse Vincent",
+        "email": "jesse@fsck.com"
+      },
+      "homepage": "https://github.com/obra/superpowers",
+      "license": "MIT",
+      "category": "workflow",
+      "tags": [
+        "tdd",
+        "debugging",
+        "planning",
+        "skills",
+        "recommended",
+        "methodology"
+      ]
+    }
+  ]
+}

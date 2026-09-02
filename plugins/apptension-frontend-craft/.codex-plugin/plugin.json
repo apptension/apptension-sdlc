@@ -1,0 +1,27 @@
+{
+  "name": "apptension-frontend-craft",
+  "version": "0.1.2",
+  "description": "Award-informed product experience skills for AI coding agents — complete UI states, interaction craft, supporting imagery, forms, polish passes, and anti-slop visual design. Complements Superpowers and Apptension SDLC so frontend work ships calm, original, and complete — not template-blank.",
+  "author": {
+    "name": "Apptension"
+  },
+  "license": "UNLICENSED",
+  "keywords": [
+    "apptension",
+    "frontend",
+    "ux",
+    "design",
+    "craft",
+    "ui"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Apptension Frontend Craft",
+    "shortDescription": "Frontend craft bar — states, motion, imagery, forms, polish.",
+    "longDescription": "Skills and checklists that raise the bar for agent-built interfaces: complete loading/empty/error states, token-driven motion, supporting imagery, mobile form UX, award-level composition, and structured polish passes. Use alongside Superpowers (process) and Apptension SDLC (issue→PR).",
+    "capabilities": [
+      "Read",
+      "Write"
+    ]
+  }
+}

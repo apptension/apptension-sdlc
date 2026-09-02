@@ -1,0 +1,50 @@
+{
+  "name": "apptension-sdlc",
+  "interface": {
+    "displayName": "Apptension SDLC Toolkit"
+  },
+  "plugins": [
+    {
+      "name": "apptension-e2e-testing",
+      "source": "./plugins/apptension-e2e-testing",
+      "category": "testing",
+      "policy": {
+        "installation": "AVAILABLE"
+      }
+    },
+    {
+      "name": "apptension-frontend-craft",
+      "source": "./plugins/apptension-frontend-craft",
+      "category": "workflow",
+      "policy": {
+        "installation": "AVAILABLE"
+      }
+    },
+    {
+      "name": "apptension-review",
+      "source": "./plugins/apptension-review",
+      "policy": {
+        "installation": "AVAILABLE"
+      }
+    },
+    {
+      "name": "apptension-sdlc",
+      "source": "./plugins/apptension-sdlc",
+      "category": "workflow",
+      "policy": {
+        "installation": "AVAILABLE"
+      }
+    },
+    {
+      "name": "superpowers",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/obra/superpowers.git"
+      },
+      "category": "workflow",
+      "policy": {
+        "installation": "AVAILABLE"
+      }
+    }
+  ]
+}
