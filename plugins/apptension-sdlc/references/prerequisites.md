@@ -1,35 +1,27 @@
----
-title: Required plugins
-area: getting-started
-position: 3
-summary: The plugins these processes need present in the session, and what an agent does when one is missing.
-plugin: apptension-sdlc
----
-
 # Required plugins
 
 Some processes here are written on top of skills another plugin ships. This
-page is the one place that records which, so a process step can point at it
+page is the one place that records which, so a skill can point at it
 instead of leaving the dependency implicit in its prose.
 
-An agent reads this page at pre-flight. A human reads it before installing.
+An agent reads this page when composing a stop about a missing plugin or
+connector. A human reads it before installing.
 
 ## The list
 
 | Plugin | Install from | Required by | What breaks without it |
 |---|---|---|---|
-| `superpowers` | `superpowers@<the Apptension marketplace you added>` | [`dev-flow`](./dev-flow.md), [`pr-checks`](./pr-checks.md) | The design track (`brainstorming`, `writing-plans`), implementation under `test-driven-development`, the failure route to `systematic-debugging`, `verification-before-completion`, and `receiving-code-review` in the monitor loop |
+| `superpowers` | `superpowers@<the Apptension marketplace you added>` | `dev-flow`, `pr-checks` | The design track (`brainstorming`, `writing-plans`), implementation under `test-driven-development`, the failure route to `systematic-debugging`, `verification-before-completion`, and `receiving-code-review` in the monitor loop |
 
 Whichever Apptension marketplace you installed this plugin from also carries
 `superpowers`: `apptension-sdlc` publicly, `apptension-dev` inside Apptension.
 Anthropic's auto-registered `superpowers@claude-plugins-official` satisfies the
 same requirement, as does installing it straight from
-[obra/superpowers](https://github.com/obra/superpowers). Any of them is fine —
-the check looks for the plugin, not for where it came from.
+[obra/superpowers](https://github.com/obra/superpowers). Any of them is fine;
+the check looks for the plugin, not where it came from.
 
-`superpowers` is listed in the Apptension marketplaces as an **external**
-entry pointing at obra's repo, not a copy of it, so you always get upstream's
-version.
+The Apptension marketplaces list `superpowers` as an external entry pointing at
+obra's repo, so installations continue to use the upstream version.
 
 ### Install path per harness
 
@@ -45,20 +37,13 @@ in:
 | OpenCode | Add `superpowers@git+https://github.com/obra/superpowers.git` as a separate package in `opencode.json` |
 | Pi | `pi install git:github.com/obra/superpowers` |
 
-**OpenCode and Pi are the exception, and it is not optional.** On those two,
-`superpowers` must be its own package from obra's repo. The Apptension
-selector registers *local* plugins only; naming an external one in
-`.opencode/apptension.json` or `.pi/apptension.json` raises
-"uses a separate package installation" rather than installing it.
+OpenCode and Pi must install `superpowers` as its own package from obra's repo.
+The Apptension selector registers local plugins only; naming an external plugin
+in `.opencode/apptension.json` or `.pi/apptension.json` raises an error instead
+of installing it. Every path above works without private marketplace access.
 
-Every path above works without access to a private marketplace: upstream ships
-a manifest per harness at its repo root, and the public `apptension-sdlc`
-marketplace lists `superpowers` as an external entry pointing there.
-
-[`getting-started.md`](./getting-started.md) holds the full install
-instructions for Claude Code, Cursor, Codex, OpenCode, and Pi, but that page
-is site-only and is not bundled into this plugin, so an agent running under
-Cursor, Codex, OpenCode, or Pi has this table and nothing else to go on. In
+Use the table above as the complete portable install guidance for Claude Code,
+Cursor, Codex, OpenCode, and Pi. In
 OpenCode, do not add `superpowers` to `.opencode/apptension.json`: that
 selector chooses which skills and commands from the Apptension toolkit package
 are registered. Superpowers is registered by its own package entry in the
@@ -66,7 +51,7 @@ global or project `opencode.json`. In Pi, do not add `superpowers` to
 `.pi/apptension.json`; it is registered by its own `pi install`.
 
 `apptension-frontend-craft` is **not** on this list. It is genuinely
-optional: [`dev-flow`](./dev-flow.md) prefers its skills for user-facing UI
+optional: `dev-flow` prefers its skills for user-facing UI
 when it is installed and states a mandatory craft bar that holds either way.
 An absent optional plugin is never a stop.
 
@@ -187,34 +172,9 @@ again." The first two things to say do not change.
 The point of checking at pre-flight is that a flow which stops later has
 already cut a branch, moved a board card, and assigned the issue — leaving a
 repo that looks worked-on and an issue owned by someone who did nothing. See
-[`./dev-flow.md`](./dev-flow.md) step 2 for where the check sits relative to
-those.
+`dev-flow` step 2 for where the check sits relative to those.
 
 Do not degrade gracefully. There is no fallback path for a missing required
 plugin: a design gate that skips brainstorming because the skill was absent
 has taken the direct track without the human's confirmation, which
-[`./dev-flow.md`](./dev-flow.md) sanctions only explicitly.
-
-## Why this isn't the cross-plugin dependency the rules forbid
-
-`plugins/README.md` lists cross-plugin runtime dependencies under its
-anti-patterns, and holds that plugins are self-contained. A declared,
-checked-up-front prerequisite is the sanctioned case, not a violation: the
-anti-pattern is about a dependency nobody wrote down, which surfaces as a
-half-working plugin mid-run.
-
-The three conditions a prerequisite has to meet — and why vendoring the
-other plugin's skills instead would be worse — are recorded in
-[`plugins/README.md` → Declared prerequisites](https://github.com/apptension/toolkit-dev/blob/main/plugins/README.md#declared-prerequisites),
-next to the anti-pattern bullet itself, which is where a plugin author will
-be reading when the question comes up.
-
-## Adding to this page
-
-A process that cannot run without another plugin's skills adds a row, and its
-own step prose links here rather than restating the dependency. A process that
-merely works *better* with another plugin does not belong on this list — say
-that in the step, the way `dev-flow` does for `apptension-frontend-craft`.
-
-The list is maintained by hand. It is short by design: a process that needs
-three other plugins to function is a process worth redesigning.
+`dev-flow` sanctions only explicitly.

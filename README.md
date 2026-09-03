@@ -11,7 +11,7 @@ Apptension's public plugin marketplace — SDLC processes, code and infrastructu
 - **apptension-e2e-testing** — Apptension E2E testing — generates Playwright end-to-end test specs from a ticket's description, unit tests, and a testing-guide doc, then verifies they run.
 - **apptension-frontend-craft** — Award-informed product experience skills for AI coding agents: complete UI states, interaction craft, supporting imagery, forms, polish passes, and anti-slop visual design. Complements Superpowers and Apptension SDLC so frontend work ships calm, original, and complete — not template-blank.
 - **apptension-review** — Apptension review skills — methodical assessments of code, infrastructure, and security, plus a full project audit with scored, comparable reports. Findings and reports only; no code changes.
-- **apptension-sdlc** — Apptension SDLC processes as skills plus bundled docs: how we work, authored once and consumed by both AI agents and the documentation site.
+- **apptension-sdlc** — Apptension SDLC processes as skills plus bundled docs: paired human guidance and portable agent contracts for how we work.
 - **superpowers** — Complete software-development methodology for AI coding agents: TDD, systematic debugging, brainstorming, plan-driven execution, and ~50 composable skills.
 
 ## Install

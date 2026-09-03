@@ -1,8 +1,8 @@
 {
   "name": "apptension-sdlc",
   "displayName": "Apptension SDLC",
-  "version": "0.9.91",
-  "description": "Apptension SDLC processes as skills plus bundled docs: how we work, authored once and consumed by both AI agents and the documentation site.",
+  "version": "0.10.2",
+  "description": "Apptension SDLC processes as skills, each carrying its own portable agent contract for how we work.",
   "author": {
     "name": "Apptension"
   },

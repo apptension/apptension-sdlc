@@ -5,7 +5,7 @@
       "id": "area-labels",
       "label": "An area taxonomy applied to issues",
       "area": "issue-intake",
-      "source": "issue-authoring.md",
+      "source": "issue-authoring",
       "detect": {
         "kind": "labels",
         "labels": [
@@ -25,7 +25,7 @@
       "id": "automated-review-workflow",
       "label": "Automated code review on pull requests",
       "area": "ci",
-      "source": "pr-checks.md",
+      "source": "pr-checks",
       "detect": {
         "kind": "matches",
         "matches": "claude-code-action|openai/codex-action|coderabbit|reviewdog|pr-agent",
@@ -44,7 +44,7 @@
       "id": "dev-flow-bindings",
       "label": "Repo bindings recorded for agents",
       "area": "dev-flow",
-      "source": "dev-flow.md",
+      "source": "dev-flow",
       "detect": {
         "kind": "heading",
         "heading": "### Dev flow bindings",
@@ -57,7 +57,7 @@
       "id": "docs-drift-workflow",
       "label": "Check that process docs keep up with process changes",
       "area": "ci",
-      "source": "sdlc-docs-check.md",
+      "source": "sdlc-docs-check",
       "detect": {
         "kind": "matches",
         "matches": "sdlc-docs",
@@ -75,7 +75,7 @@
       "id": "intake-workflow",
       "label": "Automatic triage of newly opened issues",
       "area": "issue-intake",
-      "source": "issue-intake.md",
+      "source": "issue-intake",
       "detect": {
         "kind": "matches",
         "matches": "issues:|issue_comment:",
@@ -94,7 +94,7 @@
       "id": "issue-template",
       "label": "Structured issue template",
       "area": "issue-intake",
-      "source": "issue-authoring.md",
+      "source": "issue-authoring",
       "detect": {
         "kind": "path",
         "path": ".github/ISSUE_TEMPLATE/*.y*ml"
@@ -105,7 +105,7 @@
       "id": "project-board",
       "label": "Project board under the repo's owner",
       "area": "foundation",
-      "source": "dev-flow.md",
+      "source": "dev-flow",
       "detect": {
         "kind": "board"
       },
@@ -116,7 +116,7 @@
       "id": "task-orchestrator",
       "label": "Task orchestrator recorded in the repo bindings",
       "area": "dev-flow",
-      "source": "task-dispatch.md",
+      "source": "cezar-setup",
       "detect": {
         "kind": "matches",
         "matches": "\\|\\s*Task orchestrator\\s*\\|",
@@ -129,7 +129,7 @@
       "id": "verification-workflow",
       "label": "Verification suite running on every pull request",
       "area": "ci",
-      "source": "pr-checks.md",
+      "source": "pr-checks",
       "detect": {
         "kind": "matches",
         "matches": "pull_request(_target)?:",

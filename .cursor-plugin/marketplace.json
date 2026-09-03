@@ -42,7 +42,7 @@
     {
       "name": "apptension-sdlc",
       "source": "./plugins/apptension-sdlc",
-      "description": "Apptension SDLC processes as skills plus bundled docs: how we work, authored once and consumed by both AI agents and the documentation site.\n",
+      "description": "Apptension SDLC processes as skills plus bundled docs: paired human guidance and portable agent contracts for how we work.\n",
       "category": "workflow",
       "tags": [
         "sdlc",
