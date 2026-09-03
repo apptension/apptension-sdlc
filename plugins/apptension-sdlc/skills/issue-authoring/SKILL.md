@@ -1,6 +1,6 @@
 ---
 name: issue-authoring
-description: Use when drafting a new GitHub issue for this repo — filing it directly via `gh issue create` against `.github/ISSUE_TEMPLATE/task.yml`, with the SDLC area conveyed as a label instead of the form's dropdown, and acceptance criteria that describe shipped work rather than a design-only outcome. Trigger on intent like "file an issue for X", "draft a GitHub issue", "let's write up this issue", or "open a task for this".
+description: Use when drafting a new issue for this repo's tracker — filing it directly via `gh issue create` under GitHub, against `.github/ISSUE_TEMPLATE/task.yml` with the SDLC area conveyed as a label instead of the form's dropdown, or via `createJiraIssue` under Jira — with acceptance criteria that describe shipped work rather than a design-only outcome. Trigger on intent like "file an issue for X", "draft a GitHub issue", "let's write up this issue", or "open a task for this".
 requires:
   - id: issue-template
     label: Structured issue template
@@ -29,10 +29,10 @@ requires:
 
 # Authoring a well-formed issue
 
-How to draft a GitHub issue in this repo against
-`.github/ISSUE_TEMPLATE/task.yml`, and file it with `gh issue create`. A
-human or an agent filing the next issue follows this before typing a
-title.
+How to draft a well-formed issue for this repo's tracker, and file it —
+against `.github/ISSUE_TEMPLATE/task.yml` with `gh issue create` under
+GitHub, or with `createJiraIssue` under Jira. A human or an agent filing
+the next issue follows this before typing a title.
 
 ## Write it for a human
 
@@ -226,7 +226,13 @@ outcome to write into the criteria up front.
 | Related links | Issues, PRs, specs, or docs this one depends on or extends. |
 | Out of scope | What this issue deliberately does not cover, and where it belongs instead. |
 
-## Filing convention: label instead of dropdown
+## Filing routes on the tracker
+
+Where the issue lands follows the repo's `Issue tracker` binding, the same
+row `dev-flow` reads at its own step 1: GitHub Issues files below, Jira
+files under [Filing under Jira](#filing-under-jira).
+
+## Filing under GitHub: label instead of dropdown
 
 Issues in this repo are filed directly with `gh issue create`, not through
 GitHub's web form — so the "SDLC Area" dropdown is never actually
@@ -258,6 +264,38 @@ EOF
 )"
 ```
 
+## Filing under Jira
+
+No `gh` call runs on this path — not `gh issue create`, not even a
+read like `gh label list` — the same rule the `setup` skill states for a
+non-GitHub tracker. File directly with `createJiraIssue`:
+
+    createJiraIssue(
+      cloudId: "<site, from the Issue tracker row>",
+      projectKey: "<project key, from the Issue tracker row>",
+      issueTypeName: "Task",
+      summary: "<imperative summary, no [Task]: prefix>",
+      description: "<the body's five sections, unchanged>",
+      contentFormat: "markdown"
+    )
+
+Read `projectKey` and `cloudId` off the `Issue tracker` row — recorded as
+`Jira, project key <KEY>, site <site>` — the same row `dev-flow` reads to
+scope its own Jira calls.
+
+Drop the `[Task]: ` prefix from `summary`. `task.yml` supplies it on
+GitHub; under Jira, `issueTypeName: "Task"` already says so, and a
+repeated prefix would say it twice.
+
+Carry the body's five sections into `description` unchanged — Context /
+Why, What needs to be done, Acceptance Criteria, Related links, Out of
+scope — as markdown headings, the same shape the `gh issue create` body
+above writes.
+
+No area label exists to apply either, since labels are a GitHub concept.
+Leave the area untagged until this repo decides what an area becomes
+under Jira.
+
 ## Agent context goes in a comment
 
 Execution detail — file paths, command sequences, IDs, retrieved
@@ -268,7 +306,9 @@ agent. It goes in a comment on the issue, not the body.
   `dev-flow` finds it.
   The same convention holds in a Jira comment, and `dev-flow` reads it the
   same way — it fetches Jira comments as markdown for exactly that reason.
-  Filing an issue *into* Jira is not something these processes do.
+  Writing this comment into Jira stays out of scope: it needs
+  `addCommentToJiraIssue`, which [Filing under Jira](#filing-under-jira)
+  above does not call. Filing the issue itself into Jira is covered there.
 - Optional. Write one only when there is real execution detail.
 - No length limit.
 
@@ -307,10 +347,12 @@ fail / deferred — never a blanket "AC covered".
   brainstorming" isn't a criterion — it defers the definition of done past
   the point anyone can check it. An undecided design is a signal for the
   design gate, not a reason to leave the checklist blank.
-- **Missing or wrong SDLC Area label.** An unlabeled issue, or one labeled
-  with a generic GitHub default (`bug`, `enhancement`) instead of an
-  SDLC-area label, breaks board sync and area-based filtering. Pick the
-  one area the work most belongs to, even when it touches more than one.
+- **Missing or wrong SDLC Area label, under GitHub.** An unlabeled issue,
+  or one labeled with a generic GitHub default (`bug`, `enhancement`)
+  instead of an SDLC-area label, breaks board sync and area-based
+  filtering. Pick the one area the work most belongs to, even when it
+  touches more than one. Labels are a GitHub concept, so this rule does
+  not apply under Jira — see [Filing under Jira](#filing-under-jira).
 - **Bundling unrelated concerns into one issue.** An issue that mixes two
   independently shippable changes forces them through the same branch,
   PR, and acceptance checklist even when they have nothing to do with

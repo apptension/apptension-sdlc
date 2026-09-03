@@ -25,7 +25,7 @@
       "id": "automated-review-workflow",
       "label": "Automated code review on pull requests",
       "area": "ci",
-      "source": "pr-checks",
+      "source": "code-review-setup",
       "detect": {
         "kind": "matches",
         "matches": "claude-code-action|openai/codex-action|coderabbit|reviewdog|pr-agent",

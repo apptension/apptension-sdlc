@@ -1,0 +1,400 @@
+name: Automated Code Review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: automated-code-review-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate-provider:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      provider: ${{ steps.provider.outputs.provider }}
+    steps:
+      - name: Reject untrusted bot actors
+        env:
+          ACTOR: ${{ github.actor }}
+        run: |
+          if [[ "$ACTOR" == *'[bot]' && "$ACTOR" != 'claude[bot]' ]]; then
+            echo "Unsupported bot actor: $ACTOR. Only claude[bot] may trigger automated review." >&2
+            exit 1
+          fi
+
+      - id: provider
+        env:
+          AUTOMATED_REVIEWER: ${{ vars.AUTOMATED_REVIEWER }}
+        run: |
+          case "$AUTOMATED_REVIEWER" in
+            claude|codex) echo "provider=$AUTOMATED_REVIEWER" >> "$GITHUB_OUTPUT" ;;
+            '') echo 'AUTOMATED_REVIEWER must be set to claude or codex.' >&2; exit 1 ;;
+            *) echo "Unsupported AUTOMATED_REVIEWER: $AUTOMATED_REVIEWER. Expected claude or codex." >&2; exit 1 ;;
+          esac
+
+  review-round:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      can_review: ${{ steps.review-round.outputs.can_review }}
+      codex_timeout: ${{ steps.review-round.outputs.codex_timeout }}
+      codex_job_timeout: ${{ steps.review-round.outputs.codex_job_timeout }}
+    steps:
+      - id: review-round
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MAX_ROUNDS: ${{ vars.AUTOMATED_REVIEW_ROUNDS || 3 }}
+          CODEX_TIMEOUT: ${{ vars.CODEX_REVIEW_TIMEOUT_MINUTES || 12 }}
+        run: |
+          case "$MAX_ROUNDS" in
+            ''|0|*[!0-9]*) echo "AUTOMATED_REVIEW_ROUNDS must be a positive integer, got: $MAX_ROUNDS" >&2; exit 1 ;;
+          esac
+          case "$CODEX_TIMEOUT" in
+            ''|0|*[!0-9]*) echo "CODEX_REVIEW_TIMEOUT_MINUTES must be a positive integer, got: $CODEX_TIMEOUT" >&2; exit 1 ;;
+          esac
+          if [ "$CODEX_TIMEOUT" -gt 352 ]; then
+            echo "CODEX_REVIEW_TIMEOUT_MINUTES must not exceed 352, got: $CODEX_TIMEOUT" >&2
+            exit 1
+          fi
+          echo "codex_timeout=$CODEX_TIMEOUT" >> "$GITHUB_OUTPUT"
+          echo "codex_job_timeout=$((CODEX_TIMEOUT + 8))" >> "$GITHUB_OUTPUT"
+          review_count="$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --jq '.[] | select(.user.login == "github-actions[bot]") | select(.submitted_at != null) | .id' | wc -l)"
+          same_head_count="$(gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --jq ".[] | select(.user.login == \"github-actions[bot]\") | select(.submitted_at != null) | select(.commit_id == \"$HEAD_SHA\") | .id" | wc -l)"
+          if [ "$same_head_count" -gt 0 ]; then
+            echo 'can_review=false' >> "$GITHUB_OUTPUT"
+          elif [ "$review_count" -lt "$MAX_ROUNDS" ]; then
+            echo 'can_review=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'can_review=false' >> "$GITHUB_OUTPUT"
+          fi
+
+  claude-review:
+    needs: [validate-provider, review-round]
+    if: needs.validate-provider.outputs.provider == 'claude' && needs.review-round.outputs.can_review == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+
+    steps:
+      - name: Checkout pull request merge result
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify Claude can read pull request data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid,state >/dev/null
+
+      - name: Fetch prior automated review context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          rm -rf -- .review-context
+          mkdir -- .review-context
+          gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --jq '.[]' > .review-context/prior-review-bodies.jsonl
+          gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" --jq '.[]' > .review-context/prior-inline-comments.jsonl
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Anthropic's OIDC app-token exchange rejects tokens minted under
+          # pull_request_target, so authenticate read-only GitHub calls with
+          # the workflow token. A separate trusted job posts review findings.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          allowed_bots: 'claude[bot]'
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          prompt: >-
+            /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+
+            Override for this repository: in step 1, do NOT treat "the pull
+            request is a draft" as a reason to stop. Draft is the normal
+            state for a PR here, and review feedback is expected while the
+            PR is still a draft. Evaluate the closed and does-not-need-review
+            step-1 conditions unchanged. For already-commented, stop only
+            when the prior automated review is on the same current head; when
+            it is on an older head, do not stop because this is a later review
+            round. Do not post a comment or invoke any comment tool. On later
+            rounds, read prior automated review bodies
+            from .review-context/prior-review-bodies.jsonl and inline review
+            comments from .review-context/prior-inline-comments.jsonl. Group
+            those inline comments by thread using id and in_reply_to_id. For
+            each earlier actionable finding, read the whole thread, not only
+            the original body, and report in summary whether it was
+            addressed or remains unresolved, including its location and reason.
+            Treat implementer replies as evidence: valid pushback
+            (a sound disagreement, or a won't-fix whose reason holds)
+            counts as addressed even with no code change, and do not
+            re-file the same inline finding. Invalid pushback stays
+            unresolved and names why the reply fails, not only that the
+            code did not change; re-file the finding when the defect is
+            still real. Never resolve review threads. Set head_sha
+            to the exact event head SHA
+            ${{ github.event.pull_request.head.sha }}, never the checked-out
+            merge SHA. Return only JSON matching the supplied schema. Set
+            outcome to "reviewed" only after completing the review. Set outcome
+            to "skipped" only for one of the remaining step-1 stop conditions,
+            with the reason in summary. Set outcome to "failed" if required
+            data or tools are unavailable or the review cannot otherwise be
+            completed, with the reason in summary and no findings. For a
+            completed review with no findings, set summary to "No issues found";
+            otherwise set summary to null unless it adds useful context.
+          claude_args: |
+            --model ${{ vars.CLAUDE_REVIEW_MODEL || 'sonnet' }}
+            --max-turns 40
+            ${{ vars.CLAUDE_REVIEW_EFFORT && format('--effort {0}', vars.CLAUDE_REVIEW_EFFORT) || '' }}
+            --allowedTools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(git log:*),Bash(git rev-parse:*)"
+            --json-schema '{"type":"object","additionalProperties":false,"required":["head_sha","outcome","findings","summary"],"properties":{"head_sha":{"type":["string","null"],"pattern":"^[0-9a-fA-F]{40}$"},"outcome":{"type":"string","enum":["reviewed","skipped","failed"]},"findings":{"type":"array","maxItems":50,"items":{"type":"object","additionalProperties":false,"required":["path","line","body","severity"],"properties":{"path":{"type":"string","minLength":1,"maxLength":1000},"line":{"type":"integer","minimum":1},"body":{"type":"string","minLength":1,"pattern":"\\S","maxLength":10000},"severity":{"type":["string","null"],"enum":["critical","high","medium","low","error","warning","notice","info",null]}}}},"summary":{"type":["string","null"],"minLength":1,"maxLength":20000}}}'
+
+      - name: Write Claude review artifact
+        uses: actions/github-script@v7
+        env:
+          REVIEW_OUTPUT: ${{ steps.claude-review.outputs.structured_output }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            fs.mkdirSync('review-output', { recursive: true });
+            fs.writeFileSync('review-output/review-findings.json', process.env.REVIEW_OUTPUT, 'utf8');
+
+      - name: Upload Claude review output
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-output
+          path: review-output/review-findings.json
+          if-no-files-found: error
+
+  wait-for-ci:
+    needs: [validate-provider, review-round]
+    if: needs.validate-provider.outputs.provider == 'codex' && needs.review-round.outputs.can_review == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout trusted wait script
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Wait for %%CI_WORKFLOW_FILE%% on this head SHA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          node .github/scripts/%%FETCH_SCRIPT%%.%%EXT%% \
+            --repo "$GITHUB_REPOSITORY" \
+            --head-sha "$HEAD_SHA" \
+            --wait
+
+  codex-review:
+    needs: [validate-provider, review-round, wait-for-ci]
+    if: needs.validate-provider.outputs.provider == 'codex' && needs.review-round.outputs.can_review == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(needs.review-round.outputs.codex_job_timeout) }}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Checkout trusted review instructions
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted-review
+          persist-credentials: false
+
+      - name: Checkout pull request merge result
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          path: pull-request
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch prior automated review context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          rm -rf -- pull-request/.review-context
+          mkdir -- pull-request/.review-context
+          gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --jq '.[]' > pull-request/.review-context/prior-review-bodies.jsonl
+          gh api --paginate "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" --jq '.[]' > pull-request/.review-context/prior-inline-comments.jsonl
+
+      - name: Fetch %%CI_WORKFLOW_FILE%% workflow results
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          node trusted-review/.github/scripts/%%FETCH_SCRIPT%%.%%EXT%% \
+            --repo "$GITHUB_REPOSITORY" \
+            --head-sha "$HEAD_SHA" \
+            --out pull-request/.review-context/%%CI_RESULTS_FILE%%
+
+      - name: Run Codex review
+        id: codex-review
+        # The action can write a complete review and then never return,
+        # idling until the job timeout kills it — which skips every later
+        # step, including the upload that hands the result to post-review
+        # (openai/codex-action#150). A step timeout below the job's plus
+        # continue-on-error hands control to the next step instead, which
+        # publishes the review Codex already wrote. Cancelling the job
+        # would skip that step too, so the guard has to sit on the step.
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(needs.review-round.outputs.codex_timeout) }}
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56  # v1.11
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: trusted-review/.github/codex/prompts/review.md
+          output-file: pull-request/review-findings.json
+          working-directory: pull-request
+          model: ${{ vars.CODEX_REVIEW_MODEL || 'gpt-5.6-luna' }}
+          effort: ${{ vars.CODEX_REVIEW_EFFORT || 'max' }}
+          sandbox: read-only
+          # The pinned action proxies the key out of Codex's environment.
+          # Dropping sudo keeps the read-only agent from inspecting the
+          # privileged proxy process that owns it.
+          safety-strategy: drop-sudo
+          allow-bot-users: 'claude[bot]'
+          allow-users: '*'
+          output-schema-file: trusted-review/.github/schemas/review-findings.schema.json
+
+      - name: Require a complete Codex review
+        env:
+          REVIEW_OUTCOME: ${{ steps.codex-review.outcome }}
+          FINDINGS: pull-request/review-findings.json
+        run: |
+          if [ ! -s "$FINDINGS" ]; then
+            echo "::error::Codex review step ended '$REVIEW_OUTCOME' and wrote no $FINDINGS, so there is no review to publish." >&2
+            exit 1
+          fi
+          if ! jq -e 'type == "object"' "$FINDINGS" >/dev/null 2>&1; then
+            echo "::error::Codex review step ended '$REVIEW_OUTCOME' and $FINDINGS does not hold a JSON object." >&2
+            exit 1
+          fi
+          if [ "$REVIEW_OUTCOME" != 'success' ]; then
+            echo "::warning::Codex review step ended '$REVIEW_OUTCOME', but it had already written a complete $FINDINGS, so this run publishes that review. See openai/codex-action#150."
+          fi
+
+      - name: Upload Codex review output
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-output
+          path: pull-request/review-findings.json
+          if-no-files-found: error
+
+  post-review:
+    needs: [validate-provider, review-round, claude-review, codex-review]
+    if: ${{ always() && (needs.review-round.outputs.can_review == 'false' || (needs.review-round.outputs.can_review == 'true' && ((needs.validate-provider.outputs.provider == 'claude' && needs.claude-review.result == 'success') || (needs.validate-provider.outputs.provider == 'codex' && needs.codex-review.result == 'success')))) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout trusted validator
+        if: needs.review-round.outputs.can_review == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Download review output
+        if: needs.review-round.outputs.can_review == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: review-output
+          path: review-output
+
+      - name: Validate and post review findings
+        if: needs.review-round.outputs.can_review == 'true'
+        uses: actions/github-script@v7
+        env:
+          REVIEW_OUTPUT: review-output/review-findings.json
+          PROVIDER: ${{ needs.validate-provider.outputs.provider }}
+          MAX_ROUNDS: ${{ vars.AUTOMATED_REVIEW_ROUNDS || 3 }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const {
+              validateReview,
+              loadReview,
+              changedLinesFromFiles,
+              postReview,
+            } = require('./.github/scripts/automated-review.%%EXT%%');
+            const { owner, repo } = context.repo;
+            const pullNumber = context.payload.pull_request.number;
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: pullNumber,
+              per_page: 100,
+            });
+            const review = loadReview(fs.readFileSync(process.env.REVIEW_OUTPUT, 'utf8'));
+            const eventHeadSha = context.payload.pull_request.head.sha;
+            const result = validateReview({
+              review,
+              headSha: eventHeadSha,
+              changedLines: changedLinesFromFiles(files),
+              noFindingsSummary: 'No issues found',
+            });
+            await postReview({
+              github,
+              owner,
+              repo,
+              pullNumber,
+              eventHeadSha,
+              reviewedHeadSha: review.head_sha,
+              maxRounds: Number(process.env.MAX_ROUNDS),
+              ...result,
+            });
+
+  review-complete:
+    needs: [validate-provider, review-round, claude-review, codex-review, post-review]
+    if: ${{ always() }}
+    name: Automated Code Review
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require the selected review path to succeed
+        env:
+          VALIDATE_RESULT: ${{ needs.validate-provider.result }}
+          REVIEW_ROUND_RESULT: ${{ needs.review-round.result }}
+          CAN_REVIEW: ${{ needs.review-round.outputs.can_review }}
+          PROVIDER: ${{ needs.validate-provider.outputs.provider }}
+          CLAUDE_RESULT: ${{ needs.claude-review.result }}
+          CODEX_RESULT: ${{ needs.codex-review.result }}
+          POST_RESULT: ${{ needs.post-review.result }}
+        run: |
+          [ "$VALIDATE_RESULT" = 'success' ] || exit 1
+          [ "$REVIEW_ROUND_RESULT" = 'success' ] || exit 1
+          [ "$CAN_REVIEW" = 'false' ] && exit 0
+          case "$PROVIDER" in
+            claude)
+              [ "$CLAUDE_RESULT" = 'success' ] || exit 1
+              [ "$POST_RESULT" = 'success' ] || exit 1
+              ;;
+            codex)
+              [ "$CODEX_RESULT" = 'success' ] || exit 1
+              [ "$POST_RESULT" = 'success' ] || exit 1
+              ;;
+          esac

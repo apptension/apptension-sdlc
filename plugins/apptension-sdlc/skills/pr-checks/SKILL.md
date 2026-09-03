@@ -1,6 +1,6 @@
 ---
 name: pr-checks
-description: Use right after opening a draft PR in this repo (the tail of dev-flow's draft-PR step) to start watching CI and review feedback and auto-fix what it can — or when setting up the equivalent automated-checks/review/autofix pattern in a different repo. Trigger on intent like "draft PR is open, keep watching", "monitor this PR", "watch CI and review comments", or "set up automated PR review for this repo".
+description: Use right after opening a draft PR in this repo (the tail of dev-flow's draft-PR step) to start watching CI and review feedback and auto-fix what it can. Trigger on intent like "draft PR is open, keep watching", "monitor this PR", or "watch CI and review comments".
 requires:
   - id: verification-workflow
     label: Verification suite running on every pull request
@@ -19,31 +19,6 @@ requires:
         commands — this workflow only reports pass/fail status, so it
         needs no write scope to the repository, its issues, or its pull
         requests.
-  - id: automated-review-workflow
-    label: Automated code review on pull requests
-    area: ci
-    confirm: true
-    guest_filable: false
-    detect:
-      matches: 'claude-code-action|openai/codex-action|coderabbit|reviewdog|pr-agent'
-      in: .github/workflows
-    intent: >-
-      Every pull request gets an automated first-pass code review before
-      a human looks at it, surfacing likely issues early so reviewer
-      time goes to judgment calls a machine cannot make.
-    grants:
-      - Read access to pull requests for an analysis job that calls the
-        hosting API, plus write access isolated to the trusted publisher
-        job — the analysis has to read the PR and the publisher has to
-        post its findings, but the model-provider credential must never
-        share a job with write authority.
-      - An allowed-tools scope limited to exactly the commands the
-        review step issues (e.g. viewing a PR, diffing a PR, checking
-        auth, making an authenticated API call) — never a blanket shell
-        allowance, since an unscoped shell tool can do far more than
-        review.
-      - The model-provider credential the review step calls (e.g. an
-        API key), scoped to this workflow only.
 ---
 
 # Automated PR checks: review and autofix
@@ -65,96 +40,32 @@ command whose inputs cannot have changed may report skipped, never passed.
 
 ## Automated review
 
-Implement one provider-selected workflow, not separate independently triggered
-review workflows. Store the provider choice in a repository setting and reject
-an empty or unsupported value before either provider job starts. Provider jobs
-are mutually exclusive and the final, always-run aggregate job has one stable,
-provider-neutral name for branch protection.
+One provider-selected workflow reviews every pull request, drafts
+included, and posts at most one review per head SHA through a trusted
+publisher. What the monitor needs to know about it:
 
-Run review on PR creation, later pushes, and reopen, including while the PR is a
-draft. Reject actors outside the repository's permitted set before selecting a
-provider. Use a PR-number concurrency group with `cancel-in-progress: true`, a
-bounded job timeout, an explicit model and effort setting, and a turn limit
-where the provider supports one. Pin third-party actions to commit SHAs. Measure
-actual model, duration, turns, cost, and permission denials before changing
-those controls; aliases and nested reviewer models can change cost without a
-workflow diff.
+- The cap is 3 completed `github-actions[bot]` reviews per PR unless
+  the operator raised it via the `AUTOMATED_REVIEW_ROUNDS` repository
+  variable. A capped-out PR gets no further automated rounds; do not
+  wait for one.
+- A review's outcome is `reviewed`, `skipped`, or `failed`. `skipped`
+  and `failed` explain themselves in the review body; `failed` is a
+  problem with the review run, not with the PR.
+- Later rounds read earlier findings and their reply threads. Reasoned
+  pushback on a finding counts as addressed without a code change, so
+  answering a review comment is a real action, not a formality — see
+  the loop's review watch below.
+- A repeat review of an unchanged head is suppressed. After a push,
+  expect a fresh round (cap permitting).
+- Branch protection watches one stable aggregate check,
+  `Automated Code Review`, whatever the provider.
+- A PR that edits the review workflow itself only exercises the new
+  wiring after merge; provider security guards prevent self-review of
+  that workflow.
 
-### Review rounds and prior feedback
-
-Allow exactly three completed automated rounds. Count only submitted automated
-reviews, not trigger events, pending reviews, or human reviews. Enforce the cap
-both before provider execution and in the trusted publisher so configuration
-cannot bypass it. Raising the cap requires automatic provider top-up plus an
-explicit capacity and cost decision.
-
-Later rounds receive prior automated review bodies, inline comments, and
-replies as read-only context. Group replies by thread and require the result to
-say whether each earlier finding was addressed or remains unresolved. Reasoned
-implementer pushback counts as addressed; invalid pushback remains unresolved
-and explains why. Never resolve review threads automatically. Record the exact
-reviewed head and suppress a second review for the same head.
-
-### Trusted analysis and publishing boundary
-
-Execute the workflow from trusted base-branch code. On GitHub, use
-`pull_request_target`; check out trusted prompts, schemas, validators, and
-publisher code from the base revision, and inspect the PR merge result in a
-separate full-history checkout with `persist-credentials: false`. Never execute
-PR-controlled workflow code in a job holding a provider secret or write token.
-
-Provider analysis is read-only. Give it only its own provider credential and
-the minimum repository read permissions and tool allowlist needed to inspect
-the complete diff. It emits a shared structured artifact with:
-
-- the exact PR head SHA;
-- an explicit `reviewed`, `skipped`, or `failed` outcome;
-- findings restricted to added new-side diff lines; and
-- an optional useful summary.
-
-`reviewed` means the complete diff was inspected. `skipped` is only for a
-deliberate gate such as an already-reviewed head. Missing data, denied tools, an
-incomplete diff, or any other inability to finish is `failed` with an
-explanation and no findings, never a successful empty review.
-
-A separate trusted publisher alone receives pull-request write permission and
-never receives a model-provider credential. It validates artifact shape, the
-current head SHA, added-side locations, duplicate findings, provider outcome,
-the three-round cap, and same-head duplication before posting exactly one
-review. Reject malformed, stale, failed, duplicate, and off-diff output. If no
-valid inline findings remain, publish the provider's useful summary or the
-shared no-findings verdict. Preserve a useful later-round summary that explains
-the status of earlier feedback.
-
-### Provider paths
-
-For Claude, use the selected bundled review plugin unless measured evidence
-justifies a repository-authored replacement. Pass `github_token` explicitly
-under `pull_request_target`, grant pull-request read permission, preflight the
-commands the review actually needs, and copy the plugin command's narrow
-allowed-tools declaration. Do not grant a blanket shell or commenting tool.
-Override bundled skip behavior only as needed to review drafts and changed
-heads; retain the same-head stop. Require schema-constrained output and run
-without direct comment publishing. Claude reviews without waiting for the
-verification workflow.
-
-For Codex, load the prompt and output schema from the trusted base revision,
-run against the uncredentialed PR checkout in a read-only sandbox, and describe
-the actual runtime limitations in the prompt. Before analysis, wait for the
-current head's verification run to finish and provide its conclusion and
-failure output as read-only context. A failed verification run still proceeds
-to review; a wait timeout fails the review path.
-
-Give the Codex provider step a timeout below the job timeout and
-`continue-on-error: true`. The provider writes its structured output before
-teardown; the following trusted step accepts a complete output file even if
-provider teardown timed out, and fails clearly when no complete output exists.
-This prevents a wedged action from discarding a review it already produced.
-
-On another CI system or code host, preserve the same contract: validate one
-provider choice, execute trusted instructions, isolate credentials, generate
-structured output read-only, validate and publish it in a separate write-scoped
-step, cap rounds, and expose one stable aggregate check.
+Installing or changing this machinery is the `code-review-setup`
+skill's job, including the provider selection, credentials, and the
+security shape of the workflow. This skill only watches what it posts.
 
 ## Lightweight autofix (CI side)
 

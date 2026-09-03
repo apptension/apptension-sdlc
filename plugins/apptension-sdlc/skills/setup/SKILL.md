@@ -700,18 +700,32 @@ Rules that make two runs produce the same shape:
 - **Nothing visible names the entry's `source`.** It travels in the
   first-line marker and nowhere else.
 
-For `automated-review-workflow` specifically, the issue has to name a
-starting point or it is unactionable. Require the repository variable
-`AUTOMATED_REVIEWER` alongside that workflow: it selects exactly one of
-`claude` or `codex`. A missing or unsupported selector, or a second active
-review workflow, is a configuration failure to fix with the review setup —
-never a reason to run both providers or silently skip review. Recommend the
-review capability the selected agent vendor already bundles, and treat a
-repo-authored review skill as the later option; the reasoning, cost tradeoff,
-credential isolation, and provider-specific wiring live in
-the `pr-checks` skill under "Automated review". Read the
-recommendation off that section rather than restating it here or arguing the
-tradeoff out in the issue body.
+For `automated-review-workflow` specifically, the fix is packaged: the
+`code-review-setup` skill installs the review workflow from a bundled
+template, substituting only per-repo keys. So this entry gets one more
+question before the approve prompt, beside the candidate questions —
+on a team run whose issue table contains it:
+
+```
+Automated review: this gap has an installer. Run code-review-setup in
+this session instead of filing the issue? Its own approval shows every
+file before anything is written. (run / file — enter accepts file)
+```
+
+`run` removes the row from the issue table and queues
+`code-review-setup` for after the gate; the gate output names the
+removal on an `Installing instead:` line so the row does not silently
+vanish. `file` (or no answer) keeps the row, and the filed issue's
+`Concretely, for this repo` line names the `code-review-setup` skill
+as the starting point. Either path requires the repository variable
+`AUTOMATED_REVIEWER` alongside the workflow: it selects exactly one of
+`claude` or `codex`. A missing or unsupported selector, or a second
+active review workflow, is a configuration failure to fix with the
+review setup — never a reason to run both providers or silently skip
+review. The question is for team runs only; the `guest_filable: false`
+hold-back already keeps this entry out of guest hands, and running the
+installer commits the owner to a model credential exactly as filing
+would.
 
 For `intake-workflow`, require `ISSUE_INTAKE_PROVIDER` set to `claude` or
 `codex`, plus the matching secret (`ANTHROPIC_API_KEY` or
@@ -991,12 +1005,12 @@ prompt says that scope out loud, because two bare verbs next to a
 sentence about writing a file read as if they might apply to the file
 too, and an operator who suspects that answers `no`.
 
-The `Already filed, skipping`, `Could not determine` and — on `solo` —
-`Not filed, this repo is not ours` lines are part of the gate output,
-not optional decoration. They are what a bare "filing 4 issues" would
-hide.
+The `Already filed, skipping`, `Could not determine`, `Installing
+instead` and — on `solo` — `Not filed, this repo is not ours` lines are
+part of the gate output, not optional decoration. They are what a bare
+"filing 4 issues" would hide.
 
-On `yes`, do these three things in this order, and nothing else:
+On `yes`, do these things in this order, and nothing else:
 
 1. Write the `### Dev flow bindings` section composed in step 4 to its
    target file, and leave it uncommitted. Unconditional — the deviation
@@ -1011,10 +1025,15 @@ On `yes`, do these three things in this order, and nothing else:
 
 3. Only when the tracker is GitHub Issues, run `gh issue create` for
    each approved row, in table order.
+4. Only when the review-install question above queued it, run the
+   `code-review-setup` skill. Its own gate governs every file and
+   variable it touches, so this write is approved twice, not zero
+   times.
 
 Items 2 and 3 do not run against any other tracker — not even the label
 create, which is itself a write into the host. See "A non-GitHub
-tracker" below.
+tracker" below. Item 4 runs regardless of tracker: the installer writes
+workflow files, not tracker state.
 
 On `no`, nothing happens at all: no file is written, no label is
 created, no issue is filed, and the run goes straight to the summary in

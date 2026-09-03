@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["head_sha", "outcome", "findings", "summary"],
+  "properties": {
+    "head_sha": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{40}$" },
+    "outcome": { "type": "string", "enum": ["reviewed", "skipped", "failed"] },
+    "findings": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "line", "body", "severity"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "line": { "type": "integer", "minimum": 1 },
+          "body": { "type": "string", "minLength": 1, "pattern": "\\S", "maxLength": 10000 },
+          "severity": { "type": ["string", "null"], "enum": ["critical", "high", "medium", "low", "error", "warning", "notice", "info", null] }
+        }
+      }
+    },
+    "summary": { "type": ["string", "null"], "minLength": 1, "maxLength": 20000 }
+  }
+}
