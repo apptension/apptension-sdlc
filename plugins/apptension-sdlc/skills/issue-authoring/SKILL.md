@@ -1,6 +1,6 @@
 ---
 name: issue-authoring
-description: Use when drafting a new issue for this repo's tracker — filing it directly via `gh issue create` under GitHub, against `.github/ISSUE_TEMPLATE/task.yml` with the SDLC area conveyed as a label instead of the form's dropdown, or via `createJiraIssue` under Jira — with acceptance criteria that describe shipped work rather than a design-only outcome. Trigger on intent like "file an issue for X", "draft a GitHub issue", "let's write up this issue", or "open a task for this".
+description: Use when drafting a new issue for the target repo's tracker — filing it directly via `gh issue create` under GitHub, against `.github/ISSUE_TEMPLATE/task.yml` with the area conveyed as a label instead of the form's dropdown, or via `createJiraIssue` under Jira — with acceptance criteria that describe shipped work rather than a design-only outcome. Trigger on intent like "file an issue for X", "draft a GitHub issue", "let's write up this issue", or "open a task for this".
 requires:
   - id: issue-template
     label: Structured issue template
@@ -29,7 +29,7 @@ requires:
 
 # Authoring a well-formed issue
 
-How to draft a well-formed issue for this repo's tracker, and file it —
+How to draft a well-formed issue for the target repo's tracker, and file it —
 against `.github/ISSUE_TEMPLATE/task.yml` with `gh issue create` under
 GitHub, or with `createJiraIssue` under Jira. A human or an agent filing
 the next issue follows this before typing a title.
@@ -203,8 +203,8 @@ convention, which a later section states.
 
 ## The default: every issue ends in shipped work
 
-An issue's acceptance criteria describe what "done" looks like. In this
-repo, "done" means working code merged, not a design produced. Write at
+An issue's acceptance criteria describe what "done" looks like. In the
+target repo, "done" means working code merged, not a design produced. Write at
 least one criterion naming the shipped artifact — the feature working, the
 file generated, the test passing.
 
@@ -222,28 +222,46 @@ outcome to write into the criteria up front.
 | Context / Why | The problem, and why now. Cite the issue, PR, or incident that surfaced it. |
 | What needs to be done | The concrete change. If the *how* is genuinely undecided, say so here and let the design gate route it through brainstorming. |
 | Acceptance Criteria | A checklist of shipped outcomes, each verifiable by someone who wasn't in the room — a test, a command's output, a file that exists. |
-| SDLC Area | A dropdown in the web form. This repo doesn't use the web form — see below. |
+| Area | A dropdown in the target repo's web form, when it provides one. `gh issue create` bypasses that form — see below. |
 | Related links | Issues, PRs, specs, or docs this one depends on or extends. |
 | Out of scope | What this issue deliberately does not cover, and where it belongs instead. |
 
 ## Filing routes on the tracker
 
-Where the issue lands follows the repo's `Issue tracker` binding, the same
+Where the issue lands follows the target repo's `Issue tracker` binding, the same
 row `dev-flow` reads at its own step 1: GitHub Issues files below, Jira
 files under [Filing under Jira](#filing-under-jira).
 
 ## Filing under GitHub: label instead of dropdown
 
-Issues in this repo are filed directly with `gh issue create`, not through
-GitHub's web form — so the "SDLC Area" dropdown is never actually
-rendered. Convey the same information as one of the seven SDLC-area
-labels instead: `getting-started`, `foundation`, `dev-flow`, `ci`,
-`issue-intake`, `pm`, `other`. Every issue gets exactly one.
+Issues filed with `gh issue create` bypass the target repo's web form, so
+an area dropdown is not rendered. Read the target repo's labels before
+filing:
 
 ```bash
+gh label list --repo <owner>/<repo> --limit 1000 \
+  --json name,description,isDefault
+```
+
+Exclude labels whose `isDefault` value is `true`. GitHub's nine defaults
+are `bug`, `documentation`, `duplicate`, `enhancement`, `good first issue`,
+`help wanted`, `invalid`, `question`, and `wontfix`; `isDefault` still
+identifies one if the target repo renamed it. From the remaining labels,
+identify the target repo's area taxonomy by label names and descriptions,
+then apply the best fit. A
+workflow or issue-type label such as `bug` or `enhancement` may coexist
+with the area label because the two labels answer different questions.
+
+When the target repo has no area taxonomy, omit the area label and tell the
+human that no area label was applied. Do not create a taxonomy or copy one
+from another repo while filing an issue.
+
+```bash
+AREA_ARGS=()
+# Set AREA_ARGS=(--label "<area>") only when an area label was selected.
 gh issue create --repo <owner>/<repo> \
   --title "[Task]: <imperative summary>" \
-  --label <area> \
+  "${AREA_ARGS[@]}" \
   --body "$(cat <<'EOF'
 ## Context / Why
 <why this needs to happen>
@@ -293,7 +311,7 @@ scope — as markdown headings, the same shape the `gh issue create` body
 above writes.
 
 No area label exists to apply either, since labels are a GitHub concept.
-Leave the area untagged until this repo decides what an area becomes
+Leave the area untagged until the target repo decides what an area becomes
 under Jira.
 
 ## Agent context goes in a comment
@@ -347,12 +365,12 @@ fail / deferred — never a blanket "AC covered".
   brainstorming" isn't a criterion — it defers the definition of done past
   the point anyone can check it. An undecided design is a signal for the
   design gate, not a reason to leave the checklist blank.
-- **Missing or wrong SDLC Area label, under GitHub.** An unlabeled issue,
-  or one labeled with a generic GitHub default (`bug`, `enhancement`)
-  instead of an SDLC-area label, breaks board sync and area-based
-  filtering. Pick the one area the work most belongs to, even when it
-  touches more than one. Labels are a GitHub concept, so this rule does
-  not apply under Jira — see [Filing under Jira](#filing-under-jira).
+- **Inventing or copying an area taxonomy.** Under GitHub, select the best
+  fit only from the target repo's existing area labels. If none exist,
+  file without one and say so. Workflow labels such as `bug` and
+  `enhancement` may coexist with an area label. Labels are a GitHub
+  concept, so this rule does not apply under Jira — see
+  [Filing under Jira](#filing-under-jira).
 - **Bundling unrelated concerns into one issue.** An issue that mixes two
   independently shippable changes forces them through the same branch,
   PR, and acceptance checklist even when they have nothing to do with

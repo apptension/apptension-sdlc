@@ -1,6 +1,6 @@
 {
   "name": "apptension-sdlc",
-  "version": "0.11.5",
+  "version": "0.11.8",
   "description": "Apptension SDLC processes as skills, each carrying its own portable agent contract for how we work.",
   "author": {
     "name": "Apptension"

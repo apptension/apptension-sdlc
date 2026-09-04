@@ -410,12 +410,40 @@ recorded status valid for a Story and absent for a Bug. The absent-status
 stop already covers it, and a per-type status map is speculation until a
 real project needs one.
 
+### Validating In review early
+
+Right after the `In progress` transition actually fires, call
+`getTransitionsForJiraIssue` again on the now-moved ticket. That second
+call returns the exits from the ticket's new status — the same list step 9
+will eventually read `In review` out of — so resolving it now, instead of
+waiting for step 9, catches a wrong `Tracker statuses` row before a branch
+carries a commit, not after it has been pushed.
+
+Resolve the recorded `In review` status against this fresh list under the
+[same cases](#resolving-a-jira-transition) above, short of actually
+transitioning: absent from every destination, or the destination of two
+transitions, both **stop** here, printing what the fresh list showed,
+before the design gate. Resolved to exactly one transition needs no
+comment — step 9 does the actual transition later, off the same row.
+
+Two cases run no check at all, and print nothing:
+
+- `In review` is recorded as `none`. There is nothing to validate.
+- No `In progress` transition actually fired — the stage is `none`, or the
+  ticket already sat in that status. Either way there is no fresh
+  transition list to resolve against.
+
+Step 9's own resolution and stop are unchanged: a workflow can route
+review from a status other than `In Progress`, and a project can change
+between the two steps, so this is an early warning, not a replacement.
+
 ### Jira stops
 
 Every way the Jira path stops, and what each one tells the human to do.
-They are listed together because steps 1, 2 and 9 all reach for them, and
-because a stop that names the wrong remedy sends someone to fix something
-that is not broken. The first four are the connector's own classes — see
+They are listed together because steps 1, 2, 4 and 9 all reach for them,
+and because a stop that names the wrong remedy sends someone to fix
+something that is not broken. The first four are the connector's own
+classes — see
 [the prerequisites reference](../../references/prerequisites.md#the-atlassian-connector).
 
 | Stop | The human's next action |
@@ -427,6 +455,7 @@ that is not broken. The first four are the connector's own classes — see
 | The argument's site ≠ the recorded site | **Hard stop.** Another company's Jira |
 | The argument's key prefix ≠ the recorded project key | Confirm, or fix the bindings row |
 | Recorded status on no transition's destination | Fix `Tracker statuses`, or move the ticket by hand |
+| Recorded `In review` absent from `In Progress`'s exits, caught early at step 4 | Fix `Tracker statuses`, or move the ticket by hand |
 | Two transitions lead to the recorded status | Name which, by fixing the workflow or the row |
 | `transitionJiraIssue` returns 400 | Satisfy the condition, or move it by hand |
 | `Tracker statuses` absent, or `unknown` for the stage needed | Add the row or answer the value, or rerun `setup` |
