@@ -143,7 +143,11 @@ jobs:
             re-file the same inline finding. Invalid pushback stays
             unresolved and names why the reply fails, not only that the
             code did not change; re-file the finding when the defect is
-            still real. Never resolve review threads. Set head_sha
+            still real. List in addressed_comment_ids the id of the comment
+            rooting each thread whose finding this round confirms addressed;
+            the trusted publisher resolves exactly those threads. Re-filing a
+            finding is the opposite verdict: report it in findings and leave
+            its thread open for the author. Set head_sha
             to the exact event head SHA
             ${{ github.event.pull_request.head.sha }}, never the checked-out
             merge SHA. Return only JSON matching the supplied schema. Set
@@ -151,15 +155,18 @@ jobs:
             to "skipped" only for one of the remaining step-1 stop conditions,
             with the reason in summary. Set outcome to "failed" if required
             data or tools are unavailable or the review cannot otherwise be
-            completed, with the reason in summary and no findings. For a
+            completed, with the reason in summary. A skipped or failed outcome
+            carries no findings and no addressed_comment_ids. For a
             completed review with no findings, set summary to "No issues found";
-            otherwise set summary to null unless it adds useful context.
+            otherwise set summary to null unless it adds useful context. Set
+            addressed_comment_ids to an empty array when this round confirms
+            no earlier thread addressed.
           claude_args: |
             --model ${{ vars.CLAUDE_REVIEW_MODEL || 'sonnet' }}
             --max-turns 40
             ${{ vars.CLAUDE_REVIEW_EFFORT && format('--effort {0}', vars.CLAUDE_REVIEW_EFFORT) || '' }}
             --allowedTools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(git log:*),Bash(git rev-parse:*)"
-            --json-schema '{"type":"object","additionalProperties":false,"required":["head_sha","outcome","findings","summary"],"properties":{"head_sha":{"type":["string","null"],"pattern":"^[0-9a-fA-F]{40}$"},"outcome":{"type":"string","enum":["reviewed","skipped","failed"]},"findings":{"type":"array","maxItems":50,"items":{"type":"object","additionalProperties":false,"required":["path","line","body","severity"],"properties":{"path":{"type":"string","minLength":1,"maxLength":1000},"line":{"type":"integer","minimum":1},"body":{"type":"string","minLength":1,"pattern":"\\S","maxLength":10000},"severity":{"type":["string","null"],"enum":["critical","high","medium","low","error","warning","notice","info",null]}}}},"summary":{"type":["string","null"],"minLength":1,"maxLength":20000}}}'
+            --json-schema '{"type":"object","additionalProperties":false,"required":["head_sha","outcome","findings","addressed_comment_ids","summary"],"properties":{"head_sha":{"type":["string","null"],"pattern":"^[0-9a-fA-F]{40}$"},"outcome":{"type":"string","enum":["reviewed","skipped","failed"]},"findings":{"type":"array","maxItems":50,"items":{"type":"object","additionalProperties":false,"required":["path","line","body","severity"],"properties":{"path":{"type":"string","minLength":1,"maxLength":1000},"line":{"type":"integer","minimum":1},"body":{"type":"string","minLength":1,"pattern":"\\S","maxLength":10000},"severity":{"type":["string","null"],"enum":["critical","high","medium","low","error","warning","notice","info",null]}}}},"addressed_comment_ids":{"type":"array","maxItems":50,"items":{"type":"integer","minimum":1}},"summary":{"type":["string","null"],"minLength":1,"maxLength":20000}}}'
 
       - name: Write Claude review artifact
         uses: actions/github-script@v7
@@ -340,6 +347,7 @@ jobs:
               loadReview,
               changedLinesFromFiles,
               postReview,
+              resolveAddressedThreads,
             } = require('./.github/scripts/automated-review.%%EXT%%');
             const { owner, repo } = context.repo;
             const pullNumber = context.payload.pull_request.number;
@@ -357,7 +365,7 @@ jobs:
               changedLines: changedLinesFromFiles(files),
               noFindingsSummary: 'No issues found',
             });
-            await postReview({
+            const posted = await postReview({
               github,
               owner,
               repo,
@@ -367,6 +375,17 @@ jobs:
               maxRounds: Number(process.env.MAX_ROUNDS),
               ...result,
             });
+            // A round the cap or same-head suppression stopped published no
+            // verdict, so it resolves nothing.
+            if (posted) {
+              await resolveAddressedThreads({
+                github,
+                owner,
+                repo,
+                pullNumber,
+                ...result,
+              });
+            }
 
   review-complete:
     needs: [validate-provider, review-round, claude-review, codex-review, post-review]

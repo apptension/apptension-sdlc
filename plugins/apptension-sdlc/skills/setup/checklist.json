@@ -64,7 +64,7 @@
         "in": ".github/workflows"
       },
       "optional": true,
-      "intent": "Every pull request that changes how the development process behaves gets checked for whether the process documentation was updated to match, so the written process doesn't quietly drift out of sync with what the automation actually does while still looking current.",
+      "intent": "Every pull request that changes how the development process behaves gets checked for whether the process documentation was updated to match, and every docs/sdlc/ edit gets checked for whether it names process the checkout does not have, so the written process doesn't quietly drift out of sync with what the automation actually does while still looking current.",
       "grants": [
         "Read-only file access to the repo checkout, plus write access scoped to a single pre-created verdict file and nothing else — so even a successful prompt injection from the reviewed pull request's own content can overwrite only that one file, never the docs, the workflow files, or anything else in the checkout.",
         "No shell access at all — the pull request's diff, title, and body are fetched into files by the workflow itself before the check runs, rather than the check reaching for a shell command to fetch them, since a shell tool's own flags can leak secrets past a command-level allow-rule in ways the rule can't see.",
@@ -94,12 +94,12 @@
       "id": "issue-template",
       "label": "Structured issue template",
       "area": "issue-intake",
-      "source": "issue-authoring",
+      "source": "install-task-template",
       "detect": {
         "kind": "path",
-        "path": ".github/ISSUE_TEMPLATE/*.y*ml"
+        "path": ".github/ISSUE_TEMPLATE/task.yml"
       },
-      "intent": "A new issue captures the context, the concrete change, and a verifiable definition of done before work starts, instead of leaving whoever picks it up to reconstruct that from a blank text box."
+      "intent": "A new issue captures the context, the concrete change, and a verifiable definition of done before work starts, instead of leaving whoever picks it up to reconstruct that from a blank text box. An outward-facing form that asks a stranger to report a bug does a different job, so the repo needs a template of its own for internal tasks even where other forms already exist."
     },
     {
       "id": "project-board",
@@ -113,6 +113,17 @@
       "intent": "What's in progress, what's in review, and what's done is visible at a glance, without reading through every open issue and pull request to reconstruct it."
     },
     {
+      "id": "project-verification-skill",
+      "label": "Project verification skill and feature map",
+      "area": "dev-flow",
+      "source": "create-verification-skill",
+      "detect": {
+        "kind": "path",
+        "path": "{.agents,.claude,.cursor,.codex,.opencode}/skills/*/SKILL.md"
+      },
+      "intent": "Agents can start this project's application, exercise its user-facing behavior, and preserve evidence using project-owned instructions and a feature map grounded in source. The instructions prove at least one mapped feature through launch, driving, and cleanup before completion."
+    },
+    {
       "id": "task-orchestrator",
       "label": "Task orchestrator recorded in the repo bindings",
       "area": "dev-flow",
@@ -124,6 +135,24 @@
       },
       "optional": true,
       "intent": "A developer can hand an issue off to an agent that takes it to a draft pull request without holding a session open, instead of every issue needing someone present for the whole of its run."
+    },
+    {
+      "id": "verification-maintenance-workflow",
+      "label": "Scheduled verification skill maintenance",
+      "area": "ci",
+      "source": "setup-verification-maintenance",
+      "detect": {
+        "kind": "path",
+        "path": ".github/workflows/verification-maintenance.yml"
+      },
+      "optional": true,
+      "confirm": true,
+      "intent": "A scheduled agent checks the project-owned verification instructions against source and the live application, while a separate trusted job publishes only corrections with complete proof.",
+      "grants": [
+        "Read access to repository contents and pull requests in analysis; contents, pull-request, status and Actions read access in preflight.",
+        "Contents, pull-request and status write access plus Actions read access in the trusted publisher; pull-request write access plus contents, status and Actions read access in the separate recovery job.",
+        "The selected model-provider credential in the analysis job only."
+      ]
     },
     {
       "id": "verification-workflow",

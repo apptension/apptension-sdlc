@@ -154,6 +154,7 @@ Read the repo's own configuration for each value the bindings need.
 | CI provider | `.github/workflows/`, `bitbucket-pipelines.yml`, `.gitlab-ci.yml` |
 | Stack | the same manifests the row below opens, read for what the repo *is* rather than what it runs: `package.json` (plus its lockfile, `engines`, and framework dependencies), `pyproject.toml` or `requirements.txt`, `go.mod`, `Cargo.toml`, `composer.json`, `Gemfile`, `pom.xml` or `build.gradle`, plus `Dockerfile` and any pinned-version file (`.nvmrc`, `.python-version`, `.tool-versions`). Record the language and its runtime version, the package manager, and the dominant framework, in the repo's own names for them. A polyglot repo gets each part named rather than one of them picked. |
 | Verification commands | `package.json` scripts, `Makefile` targets, `pyproject.toml`, `composer.json` |
+| Verification skill | Optional repository-relative `SKILL.md` path from the project verification discovery below. Preserve a valid explicit binding; an absent row keeps the existing command-only flow until a project skill is found or created. |
 | Automated reviewer | The GitHub Actions repository variable `AUTOMATED_REVIEWER`, after a confirmed automated-review workflow. It must be exactly `claude` or `codex`; an empty or unsupported value is a configuration failure, not an `unknown` binding. Also confirm no second independently triggered automated-review workflow remains active, because two active reviewers are the same misconfiguration. |
 | Commit convention | the Conventional-Commits prefix rate across the last ~50 subject lines |
 | Specs and plans | an existing `### Dev flow bindings` section's own value, and nothing else. If the repo has no such section, the row is `unknown`. Do not fill it from `docs/superpowers/specs/` or `docs/superpowers/plans/` existing on disk: a directory being there says nothing about whether the repo ignores it, and a row naming a path the repo tracks turns working notes into committed repo content the next time an agent writes a spec. The paths and the ignore rule that goes with them are a human's call. |
@@ -248,6 +249,36 @@ probe against the target repo and record one of `present`, `candidate`,
 | `labels` | `gh label list`, then compare against `detect` — see below |
 | `heading` | Read `detect.in` and look for the heading |
 | `board` | `gh project list` for the owner |
+
+### Project verification discovery
+
+For `project-verification-skill`, the path probe is only a candidate search.
+An unrelated skill is not evidence that the project can be driven. Resolve
+the optional `Verification skill` row in `CLAUDE.md` or `AGENTS.md` first.
+Otherwise inspect `.agents/skills`, `.claude/skills`, `.cursor/skills`,
+`.codex/skills`, and `.opencode/skills`. A usable candidate has frontmatter
+with `name` and `description`, Launch and Drive sections, a
+`features/README.md` index, and at least one feature file. Resolve aliases
+and symlinks and count each canonical repository-local directory once.
+
+Use the installed verification-maintenance runtime's `discover --root`
+command when available. `setup-verification-maintenance` describes how to
+locate its runtime. Discovery is read-only and does not invoke that installer.
+For an isolated setup skill without the runtime, perform the same checks
+above directly. Finish with one of these results:
+
+| Result | Audit and binding action |
+|---|---|
+| One usable skill | Present; skip the creation issue and propose its canonical path in `Verification skill`. |
+| None | Missing; draft the creation issue described below. |
+| Several | Candidate; present the paths and request a selection at the existing setup gate. |
+| Explicit path missing or invalid, unreadable candidate, or path outside the repo | Unknown with the exact problem; preserve the binding and file no creation issue until resolved. |
+
+For `verification-maintenance-workflow`, confirm the configured target,
+integration branch, provider, bootstrap commands and credentials as well as
+the workflow file. A missing credential or stale configuration needs the
+installer even if the filename matches. Report unsupported CI providers;
+GitHub Actions templates do not apply to them.
 
 A `labels` probe reads `detect.min_count` first.
 
@@ -396,9 +427,14 @@ needed the skill.
 
 A missing plugin is not itself an escalation trigger, and does not stop
 setup. Setup audits a repo and writes bindings; none of that needs
-`superpowers`. `dev-flow` is where the same absence is a hard stop, because
-that is the process built on the skills — see
-the `dev-flow` skill, step 2.
+`superpowers`. `dev-flow` takes the same absence as a mode: it runs reduced
+mode, preferring the harness's own plan mode and falling back to the same
+read-plan-approve contract by discipline where the harness has none, which is
+worth
+reporting here because it is the cheaper and weaker process and the
+operator should choose it rather than meet it. See the `dev-flow` skill,
+step 2, and
+[the prerequisites reference](../../references/prerequisites.md#running-without-superpowers).
 
 ## 3. Escalate, or continue
 
@@ -700,6 +736,35 @@ Rules that make two runs produce the same shape:
 - **Nothing visible names the entry's `source`.** It travels in the
   first-line marker and nowhere else.
 
+For `project-verification-skill`, draft a creation issue only for the
+missing result. Its concrete implementation names `create-verification-skill`
+and the target project's stack and existing driving tools. Acceptance criteria
+require project-owned Launch, Doctor, Drive, Evidence and Cleanup instructions,
+a source-grounded feature map, one executed feature, and evidence that remains
+after cleanup. Keep product CLI implementation and E2E suite authoring out of
+this issue. Use `<!-- repo-setup:project-verification-skill
+source:create-verification-skill -->` as its marker.
+
+Before drafting that issue, fetch **all** open setup issues, following API
+pagination. For GitHub, use `gh api --paginate --slurp` on
+`repos/<owner>/<repo>/issues?state=open&labels=repo-setup&per_page=100` and
+ignore pull-request entries. A matching `repo-setup:project-verification-skill`
+marker, with whitespace or the comment terminator after the id, skips creation
+and reports the existing issue number. A failed lookup is unknown and blocks
+filing this gap, not evidence of an empty backlog. The runtime's `discover
+--issues <json-file>` accepts the paginated JSON and applies the same rule.
+
+For `verification-maintenance-workflow`, a team setup run proposes
+`setup-verification-maintenance` under `Installing instead:` at the existing
+gate. Show the target, weekly schedule proposal, agent provider and credential,
+project bootstrap and exact files before approval. Reuse an existing supported
+provider choice; otherwise let the operator choose. The installer compares
+rendered files and config and leaves matching installs untouched. If the
+operator declines installation, keep an actionable setup issue naming that
+skill. Guest runs report this paid-credential and write-permission gap without
+installing or filing it. Installation may precede creation of the project
+skill; scheduled runs then report the missing target and open no PR.
+
 For `automated-review-workflow` specifically, the fix is packaged: the
 `code-review-setup` skill installs the review workflow from a bundled
 template, substituting only per-repo keys. So this entry gets one more
@@ -716,8 +781,9 @@ file before anything is written. (run / file — enter accepts file)
 `code-review-setup` for after the gate; the gate output names the
 removal on an `Installing instead:` line so the row does not silently
 vanish. `file` (or no answer) keeps the row, and the filed issue's
-`Concretely, for this repo` line names the `code-review-setup` skill
-as the starting point. Either path requires the repository variable
+`Concretely, for this repo` line describes the review workflow to add
+for this repo's stack and host, naming no skill, for the same reason.
+Either path requires the repository variable
 `AUTOMATED_REVIEWER` alongside the workflow: it selects exactly one of
 `claude` or `codex`. A missing or unsupported selector, or a second
 active review workflow, is a configuration failure to fix with the
@@ -726,6 +792,31 @@ review. The question is for team runs only; the `guest_filable: false`
 hold-back already keeps this entry out of guest hands, and running the
 installer commits the owner to a model credential exactly as filing
 would.
+
+`issue-template` has an installer too, and its question runs on both
+paths. The `install-task-template` skill writes
+`.github/ISSUE_TEMPLATE/task.yml` from a bundled template, filling the
+Area dropdown from labels the repo already has. One form file needs no
+credential, grants no agent write scope, and lands uncommitted like the
+bindings do, so a guest run offers it as readily as a team run. It
+defaults to running rather than filing, for the same reason:
+
+```
+Task template: this gap has an installer. Run install-task-template in
+this session instead of filing the issue? Its own approval shows the
+file before anything is written. (run / file, enter accepts run)
+```
+
+`run` removes the row from the issue table, queues
+`install-task-template` for after the gate, and names the removal on the
+same `Installing instead:` line. `file` keeps the row, and the filed
+issue's `Concretely, for this repo` line describes the form to add, its
+path and its fields, naming no skill. The entry's `source` travels in the
+hidden marker and nowhere else, per the rule above, and an internal skill
+name is unreadable in a repo that has never installed this plugin. Either
+answer leaves `area-labels` alone, because a repo with no area taxonomy
+gets a template with no dropdown, and the labels stay their own row on
+the list.
 
 For `intake-workflow`, require `ISSUE_INTAKE_PROVIDER` set to `claude` or
 `codex`, plus the matching secret (`ANTHROPIC_API_KEY` or
@@ -1025,15 +1116,22 @@ On `yes`, do these things in this order, and nothing else:
 
 3. Only when the tracker is GitHub Issues, run `gh issue create` for
    each approved row, in table order.
-4. Only when the review-install question above queued it, run the
-   `code-review-setup` skill. Its own gate governs every file and
-   variable it touches, so this write is approved twice, not zero
-   times.
+4. Run each installer the questions above queued, in the order they were
+   asked: `code-review-setup`, then `install-task-template`. Each one's
+   own gate governs every file and variable it touches, so these writes
+   are approved twice, not zero times.
+
+5. When verification maintenance was approved for installation, invoke
+   `setup-verification-maintenance` with the approved configuration and rendered
+   files. Reuse that approval when the files match; a changed proposal returns
+   to the gate. Leave the install uncommitted, like the bindings.
 
 Items 2 and 3 do not run against any other tracker — not even the label
 create, which is itself a write into the host. See "A non-GitHub
-tracker" below. Item 4 runs regardless of tracker: the installer writes
-workflow files, not tracker state.
+tracker" below. Items 4 and 5 write repo files: `code-review-setup` and
+`setup-verification-maintenance` run regardless of tracker.
+`install-task-template` reaches item 4 only under GitHub Issues, because
+`.github/ISSUE_TEMPLATE` applies only to GitHub.
 
 On `no`, nothing happens at all: no file is written, no label is
 created, no issue is filed, and the run goes straight to the summary in

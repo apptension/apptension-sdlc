@@ -1,6 +1,6 @@
 ---
 name: sdlc-docs-check
-description: Use when a PR is opened or updated in this repo, to judge whether it changes the SDLC process and, if so, whether its docs/sdlc/ changes cover that. Trigger on intent like "check this PR's SDLC docs", "does this PR need a docs update", or "run the sdlc-docs-check on PR #N".
+description: Use when a PR is opened or updated in this repo, including drafts, to check SDLC process documentation. Trigger on intent like "check this PR's SDLC docs", "does this PR need a docs update", "run the sdlc-docs-check on PR #N", or when a docs-only PR may invent process the repo does not have.
 requires:
   - id: docs-drift-workflow
     label: Check that process docs keep up with process changes
@@ -12,9 +12,10 @@ requires:
     intent: >-
       Every pull request that changes how the development process
       behaves gets checked for whether the process documentation was
-      updated to match, so the written process doesn't quietly drift
-      out of sync with what the automation actually does while still
-      looking current.
+      updated to match, and every docs/sdlc/ edit gets checked for
+      whether it names process the checkout does not have, so the
+      written process doesn't quietly drift out of sync with what
+      the automation actually does while still looking current.
     grants:
       - Read-only file access to the repo checkout, plus write access
         scoped to a single pre-created verdict file and nothing else —
@@ -34,6 +35,11 @@ requires:
 
 A pull request that changes how the SDLC behaves must also update
 `docs/sdlc/`, or the documented process drifts from the real one.
+The same drift inverted: `docs/sdlc/` that names process the checkout
+does not have. A docs-only PR is not a free `PASS`. If the diff
+touches `docs/sdlc/`, check every path the added prose names as present
+before writing the verdict: Glob the checkout, and treat a path this
+PR's `diff.patch` adds as present even when the checkout is the base.
 
 This check judges the actual diff rather than matching the PR's changed
 paths against a fixed list. A fixed list — any touch to
@@ -42,16 +48,20 @@ requiring a `docs/sdlc/` change in the same diff — would need constant
 upkeep as the repo grows new automation surfaces, and it cannot tell a
 behaviour change from a rename or a comment fix in the same file: every
 match would still demand a docs touch, or an escape-hatch label to waive
-it. Reading the diff and judging behaviour directly, via the two
+it. Reading the diff and judging behaviour directly, via the three
 questions below, avoids both problems.
 
 ```mermaid
 flowchart LR
     A[pull_request event] --> B{Process-relevant?}
-    B -- no --> P1[PASS: not relevant]
-    B -- yes --> C{docs/sdlc/ diff covers it?}
-    C -- yes --> P2[PASS: covered]
-    C -- no --> F[FAIL: gap + what to add]
+    B -- yes --> C{docs/sdlc/ covers it?}
+    C -- no --> F1[FAIL: gap + what to add]
+    C -- yes --> D
+    B -- no --> D{docs/sdlc/ in the diff?}
+    D -- no --> P1[PASS: not relevant]
+    D -- yes --> E{prose matches the checkout?}
+    E -- invented --> F2[FAIL: invented process]
+    E -- no --> P2[PASS]
 ```
 
 ## Trigger
@@ -82,7 +92,12 @@ and are never echoed to the job log, and the diff is already fully
 PR-controlled text, so allowing them widens no surface that plain text did
 not already reach — see "Untrusted input" below.
 
-## The two judgements
+## The three judgements
+
+A `PASS` is legal only after every applicable judgement has an answer.
+Judgement 1 being no is not itself a `PASS`. Write `FAIL` if judgement 1
+is yes and judgement 2 is no, or if the diff touches `docs/sdlc/` and
+judgement 3 is a clear invention.
 
 **1. Does this PR change the SDLC process?** Not a path match — a
 judgement about behaviour, chosen over matching changed paths against a
@@ -100,10 +115,11 @@ tooling that enforces a process rule (the version-bump guard, this check
 itself); a change that adds, removes, or renames a repo artifact that a
 `requires:` front-matter entry points at — a workflow file, the issue
 template, the label set — since the checklist those entries build is
-what a repo adopting these processes is audited against. Things that
+what a repo adopting these processes is audited against.   Things that
 usually mean no: dependency bumps, formatting, typo fixes in comments,
-changes to the marketplace generator's emitters, test-only changes that
-don't alter behaviour, and edits to `docs/sdlc/` itself.
+changes to the marketplace generator's emitters, and test-only changes
+that don't alter behaviour. Edits to `docs/sdlc/` itself are no for
+this question; they are the input to judgement 3, not a verdict.
 
 Generator-internals changes under `tools/generator/` are the case most
 likely to sit on the fence, since this repo touches that directory
@@ -121,13 +137,28 @@ does not cover a new workflow. A change to a documented value — a path,
 a label, a command — must be reflected wherever that value is stated.
 That includes the `requires:` blocks in front-matter: renaming or
 deleting an artifact a `requires:` entry names, without updating the
-entry, leaves the checklist describing a repo that no longer exists.
+  entry, leaves the checklist describing a repo that no longer exists.
+
+**3. If the diff touches `docs/sdlc/`, does the added prose describe
+behaviour the checkout actually has?** This question runs when
+judgement 1 is no, whenever the diff touches `docs/sdlc/`. A docs-only
+PR is how invented process lands. A path, command, or stage written as
+present is a `FAIL` when it is absent from the checkout and not added
+in `.sdlc-pr-context/diff.patch`. A file this PR introduces is present.
+The same claim written as not built yet, planned, or open in an issue
+is a `PASS`. You have no shell; existence is Glob on the checkout plus
+paths the diff itself adds.
+
+A present-tense `tools/quote-calculator/` that Glob does not find is a
+clear invention. A sentence that says the calculator is not in the repo
+yet is not.
 
 ## Calibration
 
 Return `FAIL` only when the gap is clear and a reviewer would agree the
-docs are now wrong or silent about a real behaviour change. When
-genuinely uncertain, return `PASS` and say why in the explanation.
+docs are now wrong or silent about a real behaviour change, or invent
+present behaviour the checkout does not have. When genuinely uncertain,
+return `PASS` and say why in the explanation.
 
 The asymmetry is deliberate. A missed gap costs a stale paragraph that a
 human reviewer can still catch in the normal PR review. A false failure
@@ -221,7 +252,7 @@ how tightly it's scoped.
 | Skill invoked | `/apptension-sdlc:sdlc-docs-check` |
 | Verdict file | `.sdlc-docs-verdict` in the workspace root |
 | PR context files | `.sdlc-pr-context/meta.json` (title, body, metadata) and `.sdlc-pr-context/diff.patch` (the diff), fetched by the workflow before the skill runs |
-| `--allowedTools` scope | `Read`, `Grep`, `Glob`, `Edit(.sdlc-docs-verdict)` — no `Bash` entry at all. `gh --jq` is gojq, whose `env`/`$ENV` builtins resolve against the whole process environment (including the model-provider key), and an `--allowedTools` prefix rule like `Bash(gh pr view:*)` restricts the subcommand, not the flags after it — it cannot exclude `--jq`. So the only safe scope is no shell access at all; the PR's diff and metadata are fetched into files by a workflow step before the model runs (see "The two judgements" above), not by the model itself. Spelled `Edit(.sdlc-docs-verdict)` rather than `Write(.sdlc-docs-verdict)`: a `Write(<path>)` allow-rule is not matched by Claude Code's file-permission checks at all (it is rejected at startup with a warning to use `Edit(...)` instead), while an `Edit(<path>)` rule is matched and covers every file-modifying tool, including Write and NotebookEdit. A bare `Write` cannot be path-scoped, so an injected instruction could overwrite any file in the checkout — `docs/sdlc/*.md`, `CLAUDE.md`, workflow files included; scoping to the one path this skill is meant to touch closes that |
+| `--allowedTools` scope | `Read`, `Grep`, `Glob`, `Edit(.sdlc-docs-verdict)` — no `Bash` entry at all. `gh --jq` is gojq, whose `env`/`$ENV` builtins resolve against the whole process environment (including the model-provider key), and an `--allowedTools` prefix rule like `Bash(gh pr view:*)` restricts the subcommand, not the flags after it — it cannot exclude `--jq`. So the only safe scope is no shell access at all; the PR's diff and metadata are fetched into files by a workflow step before the model runs (see "The three judgements" above), not by the model itself. Spelled `Edit(.sdlc-docs-verdict)` rather than `Write(.sdlc-docs-verdict)`: a `Write(<path>)` allow-rule is not matched by Claude Code's file-permission checks at all (it is rejected at startup with a warning to use `Edit(...)` instead), while an `Edit(<path>)` rule is matched and covers every file-modifying tool, including Write and NotebookEdit. A bare `Write` cannot be path-scoped, so an injected instruction could overwrite any file in the checkout — `docs/sdlc/*.md`, `CLAUDE.md`, workflow files included; scoping to the one path this skill is meant to touch closes that |
 | Claude model / effort | `SDLC_DOCS_CLAUDE_MODEL` (empty → `sonnet`), `SDLC_DOCS_CLAUDE_EFFORT` (empty → omit `--effort`) |
 | Codex prompt | `.github/codex/prompts/sdlc-docs.md`, loaded from `github.event.pull_request.base.sha` so a PR cannot rewrite the criteria that judge it. Codex writes the same `.sdlc-docs-verdict` file; it has no shell access and receives only the pre-fetched PR context |
 | Codex model / effort | `SDLC_DOCS_CODEX_MODEL` (empty → `gpt-5.6-luna`), `SDLC_DOCS_CODEX_EFFORT` (empty → `max`) |

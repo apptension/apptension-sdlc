@@ -2,16 +2,6 @@
 name: issue-authoring
 description: Use when drafting a new issue for the target repo's tracker — filing it directly via `gh issue create` under GitHub, against `.github/ISSUE_TEMPLATE/task.yml` with the area conveyed as a label instead of the form's dropdown, or via `createJiraIssue` under Jira — with acceptance criteria that describe shipped work rather than a design-only outcome. Trigger on intent like "file an issue for X", "draft a GitHub issue", "let's write up this issue", or "open a task for this".
 requires:
-  - id: issue-template
-    label: Structured issue template
-    area: issue-intake
-    detect:
-      path: .github/ISSUE_TEMPLATE/*.y*ml
-    intent: >-
-      A new issue captures the context, the concrete change, and a
-      verifiable definition of done before work starts, instead of
-      leaving whoever picks it up to reconstruct that from a blank text
-      box.
   - id: area-labels
     label: An area taxonomy applied to issues
     area: issue-intake
@@ -33,6 +23,33 @@ How to draft a well-formed issue for the target repo's tracker, and file it —
 against `.github/ISSUE_TEMPLATE/task.yml` with `gh issue create` under
 GitHub, or with `createJiraIssue` under Jira. A human or an agent filing
 the next issue follows this before typing a title.
+
+## This run ends when the issue exists
+
+Treat the user's message as the issue's subject. Draft the issue, file it
+on the tracker. On GitHub, post the agent-context comment when there is
+execution detail. Stop. Done is the issue URL, plus the agent-context
+comment on GitHub when one was needed.
+
+Once this skill is already in context, the user's message is the subject
+even when it never says "file".
+
+## The default: every issue ends in shipped work
+
+The issue you file still has to describe shipped work. That is a rule for
+its acceptance criteria, not for this run. This run still ends when the
+issue exists.
+
+An issue's acceptance criteria describe what "done" looks like. In the
+target repo, "done" means working code merged, not a design produced. Write at
+least one criterion naming the shipped artifact — the feature working, the
+file generated, the test passing.
+
+`dev-flow`'s design gate covers the *how*: an issue that fails its four
+direct-track checks goes through `superpowers:brainstorming` and
+`superpowers:writing-plans` first, but that work lands in the same issue's
+branch and PR. Splitting off a follow-up issue is the exception, not the
+outcome to write into the criteria up front.
 
 ## Write it for a human
 
@@ -201,19 +218,6 @@ convention, which a later section states.
    the subsystem, only an answer to one question: does this read like a
    person wrote it? That read catches what the rules miss.
 
-## The default: every issue ends in shipped work
-
-An issue's acceptance criteria describe what "done" looks like. In the
-target repo, "done" means working code merged, not a design produced. Write at
-least one criterion naming the shipped artifact — the feature working, the
-file generated, the test passing.
-
-`dev-flow`'s design gate covers the *how*: an issue that fails its four
-direct-track checks goes through `superpowers:brainstorming` and
-`superpowers:writing-plans` first, but that work lands in the same issue's
-branch and PR. Splitting off a follow-up issue is the exception, not the
-outcome to write into the criteria up front.
-
 ## The template's fields
 
 | Field | What belongs there |
@@ -225,6 +229,13 @@ outcome to write into the criteria up front.
 | Area | A dropdown in the target repo's web form, when it provides one. `gh issue create` bypasses that form — see below. |
 | Related links | Issues, PRs, specs, or docs this one depends on or extends. |
 | Out of scope | What this issue deliberately does not cover, and where it belongs instead. |
+
+Under GitHub, `gh issue create` writes this shape whether or not the file
+exists, so a missing template never blocks filing. It does leave a human
+filing through the web UI with whatever forms the repo inherited. The
+`install-task-template` skill fixes that by writing `task.yml` with the
+Area dropdown filled from this repo's own labels. Run it when
+`.github/ISSUE_TEMPLATE/task.yml` is absent.
 
 ## Filing routes on the tracker
 
@@ -309,6 +320,17 @@ Carry the body's five sections into `description` unchanged — Context /
 Why, What needs to be done, Acceptance Criteria, Related links, Out of
 scope — as markdown headings, the same shape the `gh issue create` body
 above writes.
+
+Jira's markdown conversion degrades one line: a `- [ ]` item in
+Acceptance Criteria does not become a Jira checkbox. It stores
+`* \[ \]` — an ordinary bullet with the brackets escaped — so the
+checklist files as plain bullets, not tickable task items. Headings,
+inline code, and quotes all survive the same conversion; only the task
+list markup does not. Making it tickable needs `contentFormat: "adf"`
+and a hand-built ADF document for the whole description — a format this
+toolkit does not use anywhere else — so this skill keeps markdown
+instead. File the checklist as written, and expect Jira to show it as
+bullets that a reviewer reads down, not checkboxes they click.
 
 No area label exists to apply either, since labels are a GitHub concept.
 Leave the area untagged until the target repo decides what an area becomes

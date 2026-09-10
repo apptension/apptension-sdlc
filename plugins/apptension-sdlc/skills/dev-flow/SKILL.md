@@ -71,7 +71,8 @@ flowchart TD
     E --> F{Design gate}
     F -- micro · one named surface --> I[Implement · TDD]
     F -- direct · human confirms --> I
-    F -- design --> G[brainstorming] --> H[writing-plans] --> I
+    F -- design · full --> G[brainstorming] --> H[writing-plans] --> I
+    F -- design · reduced --> P[harness plan mode] --> I
     I -. micro: touched outside the surface .-> F
     I --> J{Verification green?}
     J -- no --> K[systematic-debugging] --> I
@@ -142,15 +143,21 @@ so a comment cannot steer execution on its own.
 
 ## 2. Pre-flight
 
-Confirm all of the following before touching anything — the last two
-apply only when this ticket's tracker resolved to Jira in step 1, which is
-not always the same thing as the repo's `Issue tracker` binding (a GitHub
-URL read under a Jira-tracked repo needs neither):
+Settle all of the following before touching anything. Every one but the
+first is a check that passes or stops; the first picks the mode the rest of
+the run uses. The last two apply only when this ticket's tracker resolved
+to Jira in step 1, which is not always the same thing as the repo's `Issue
+tracker` binding (a GitHub URL read under a Jira-tracked repo needs
+neither):
 
-- the `superpowers` plugin is available in this session — its skills
-  appear in the session's skill listing. Check the plugin, not one named
-  skill, and treat installed-but-disabled as absent: neither can run a
-  skill;
+- whether the `superpowers` plugin is available in this session, which its
+  skills appearing in the session's skill listing answers. Check the
+  plugin, not one named skill, and treat installed-but-disabled as absent,
+  since neither can run a skill. **This check picks a mode.** Present means
+  the full track; absent means **reduced mode**, announced once, here, in
+  the shape below. A harness that cannot list its own skills at all is a
+  stop, because absent and unreadable are different answers and guessing
+  between them would downgrade a session that has the full track;
 - the issue is open and has no pull request already attached;
 - its acceptance criteria read as requirements, not as an open question;
 - issues it depends on are resolved — if it references open work that must
@@ -170,14 +177,35 @@ URL read under a Jira-tracked repo needs neither):
   branch. Catching it here costs one earlier check and no wasted branch.
 
 A failure here is a conversation with the human, not a judgment call to
-work around.
+work around. The `superpowers` check is the one exception, because it
+reports a mode rather than failing.
 
-The plugin check comes first because it is the one that gets more expensive
-the later it runs. Steps 3 and 4 cut a branch, move the board card, and
-assign the issue; a flow that runs out of skills after that leaves a repo
-that looks worked-on and an issue owned by someone who did nothing.
+**Announcing reduced mode.** One message, before anything moves, carrying
+three things: that `superpowers` is absent and the run continues in reduced
+mode, what the mode changes in one clause, and the install path for this
+harness so the full track stays one command away. Under Claude Code:
+
+> `superpowers` is not available in this session. Running in reduced mode:
+> the design track uses this harness's plan mode, and steps 6, 7 and 9 use
+> their inline equivalents. Install it with
+> `/plugin install superpowers@apptension-sdlc` for the full track.
+
+Under Cursor and Codex the same message ends "install `superpowers` from the
+Apptension marketplace you already added"; under OpenCode, "add
+`superpowers@git+https://github.com/obra/superpowers.git` as its own package
+in `opencode.json`"; under Pi, "`pi install
+git:github.com/obra/superpowers`". The first two things to say do not change.
+
+Say it once, not per step. A run that announces the substitution every time
+it reaches one spends tokens telling the human something they chose.
+
+The plugin check comes first because the mode it picks governs steps 5, 6,
+7 and 9, and a developer should know which process they are getting before
+it starts rather than at the first substitution. Reduced mode is cheaper
+and weaker, so it is stated once and never discovered.
 [The prerequisites reference](../../references/prerequisites.md) names each
-plugin's install command per harness and what a stop should say.
+plugin's install command per harness, what reduced mode gives up, and what
+the announcement should say.
 
 The connector's live call sits here for the same reason, and it is the one
 Jira-specific thing worth spending a round trip on before anything moves:
@@ -206,6 +234,11 @@ nowhere else — not off the default branch, and not off what branches happen
 to exist on the remote. Under GitHub flow it is the default branch, and the
 two rows name the same branch; under git flow it is `develop`, while the
 default branch is what releases ship from.
+
+Before branching or adding a worktree, prune worktrees whose pull
+requests have merged. Run the command in
+[Prune merged worktrees](../../references/prune-worktrees.md). The
+command has exited 0 before the new branch or worktree is created.
 
 ```bash
 git fetch origin
@@ -451,7 +484,7 @@ classes — see
 | Harness exposes no tool list | Nothing here; the Jira path is unavailable in this harness |
 | No tool ending in `getJiraIssue` | Connect the Atlassian connector |
 | A call returns 401 or 403 | Sign in again — not an install problem |
-| Recorded site absent from the resource list | Not Cloud, or not granted |
+| Recorded site absent from the resource list | Six distinct causes, six different fixes — see [what each failure means](../../references/prerequisites.md#what-each-failure-means) |
 | The argument's site ≠ the recorded site | **Hard stop.** Another company's Jira |
 | The argument's key prefix ≠ the recorded project key | Confirm, or fix the bindings row |
 | Recorded status on no transition's destination | Fix `Tracker statuses`, or move the ticket by hand |
@@ -497,9 +530,10 @@ Take the **direct track** — no brainstorming, no written plan — only if
   manifest-shape change;
 - the change can be stated in one sentence without hedging.
 
-Anything failing one criterion takes the **design track**:
-`superpowers:brainstorming`, then `superpowers:writing-plans`. Default when
-uncertain is the design track. An issue whose ask is literally "run
+Anything failing one criterion takes the **design track**, whose vehicle
+depends on the mode step 2 recorded and which
+[The design track's two vehicles](#the-design-tracks-two-vehicles) below
+sets out. Default when uncertain is the design track. An issue whose ask is literally "run
 `superpowers:brainstorming` to design X" is never eligible for the direct
 track, whatever the criteria say.
 
@@ -515,6 +549,69 @@ is sanctioned **only** with that explicit confirmation, which is why the
 agent states its call and waits instead of proceeding quietly. The micro
 track also skips brainstorming, on a narrower sanction of its own that it
 argues for below — not on this one.
+
+Reduced mode is not a third sanction. It changes which vehicle the design
+track uses, never whether a change is entitled to skip that track.
+
+### The design track's two vehicles
+
+The track's criteria do not move with the mode. Only the way it produces a
+design does.
+
+| Mode | Vehicle | Produces |
+|---|---|---|
+| Full | `superpowers:brainstorming`, then `superpowers:writing-plans` | A spec and a plan, written where the `Specs and plans` binding points |
+| Reduced | The harness's own plan mode | Whatever that harness does with a plan |
+
+There is no fourth track. A change that would have taken the design track
+under one mode takes it under the other, judged against the same criteria.
+
+**The contract.** Four things hold before the first edit, whichever vehicle
+carried the design:
+
+1. Read the code the change touches before choosing an approach.
+2. Produce a plan naming what changes, which files it touches, and how it
+   gets verified.
+3. Get the human's explicit approval of that plan.
+4. Write nothing before 3.
+
+Plan mode is the preferred vehicle in reduced mode because the harness
+enforces point 4 mechanically rather than by good intentions. Where a
+harness cannot enforce it, honour it anyway.
+
+**Where the plan lives is the harness's business.** Do not write it into
+the repo, do not attach it to the ticket, and do not name a path for it.
+Claude Code writes a plan to a file whose path arrives in the plan-mode
+system message at runtime, so it cannot be known in advance, and other
+harnesses hold a plan differently. This flow depends on the approval having
+happened, never on where the plan sits.
+
+Under reduced mode, ask clarifying questions in one round rather than a
+sequence. The one-question-per-message loop is the most expensive thing
+`superpowers:brainstorming` does, and the first thing a developer on a
+tight usage limit notices. This does not touch full mode: where
+`brainstorming` runs, its questioning contract runs with it, unchanged.
+
+#### Entering plan mode
+
+Only Claude Code has a door an agent can open by itself. Everywhere else,
+ask the human, because a wrong command is worse than none.
+
+| Harness | How to enter plan mode |
+|---|---|
+| Claude Code | Call `EnterPlanMode`, then `ExitPlanMode` to request approval |
+| Cursor | Ask the human to switch the session to Plan mode |
+| Codex | Ask the human to switch the session to its plan mode |
+| OpenCode | Ask the human to switch the session to plan mode |
+| Pi | Ask the human whether this session has a plan mode |
+| A harness with no plan mode | Follow the four-point contract by discipline |
+
+The last row excludes nobody. What a harness without plan mode loses is the
+mechanical block on editing, not the gate.
+
+Some harnesses expose a plan or to-do tool that tracks steps without gating
+approval. Such a tool does not satisfy point 3 on its own. Use it to show
+progress where the session has one, and still get the approval.
 
 ### The micro track
 
@@ -707,6 +804,11 @@ list above remains the mandatory bar either way.
 ## 6. Implement
 
 Use `superpowers:test-driven-development` wherever the change is testable.
+In reduced mode, do what it does: write the failing test first, run it and
+watch it fail, then write the smallest code that makes it pass. The
+testable and not-testable split below is unchanged, and so is the QA note
+that stands in for a test.
+
 The repo's own conventions bind here — read `CLAUDE.md` before editing and
 follow what it says about generated files, version bumps, and layout.
 
@@ -737,7 +839,21 @@ load `product-experience-standard` and the specialists that apply.
 
 Run the repo's verification commands from the bindings and read the output.
 A failure routes to `superpowers:systematic-debugging`, not to a pull
-request with a caveat. **No PR opens on red.**
+request with a caveat. In reduced mode, find the cause before writing the
+fix: read the failure, form one hypothesis, test that hypothesis, and
+change code only once the cause is known. **No PR opens on red** either
+way.
+
+If the optional `Verification skill` binding names a project-local
+`SKILL.md`, read it and use its driving instructions for the behavior this
+change touches. Record the mapped features exercised and surviving evidence
+with verification results. A missing, unreadable, or out-of-repository bound
+path is a verification problem to resolve, not permission to skip the skill.
+An absent or `unknown` row preserves the existing command-based flow; do not
+start setup or create a skill during an unrelated ticket. Project driving
+supplements every command required by the `Verification` row. Keep E2E suite
+authoring with `apptension-e2e-testing`; reuse existing project tools for live
+proof without creating a second suite here.
 
 When UI files changed, affirm the craft checklist from the design-gate
 section above and record it under **Experience** in the PR body. If
@@ -761,6 +877,25 @@ Jira binds commits through its development panel regardless, and under
 GitHub the commit does not carry `Closes #N` either.
 
 ## 9. Draft PR, then board to In review
+
+**Confirm the branch merges cleanly into the integration branch before
+anything else in this step.** A conflicted pull request gets no CI at
+all, so opening one is opening on red with the red hidden.
+
+```bash
+git fetch origin
+git merge origin/<integration branch>
+```
+
+`Already up to date` is the pass. A merge that brings commits in with
+no conflict is a plain merge commit: rerun step 7's verification on the
+merged tree, push, then go on. A conflict is a failure on the same
+footing as red verification, and no draft PR opens while it stands:
+resolve every conflict, rerun step 7's verification, commit the merge,
+push, then go on. Merge, never rebase, so the push stays a
+fast-forward and no force-push is ever needed. A conflict you cannot
+resolve → `git merge --abort`, report the conflicting paths, stop and
+ask.
 
 Open the PR as a draft. The body's structure comes from the repo's **own**
 pull request template where it has one, and from
@@ -803,9 +938,9 @@ The body must carry:
 | `Closes #N` | Closing keyword — present when the ticket is a GitHub issue, whatever the tracker binding says | The board only auto-moves the card to Done on merge via this |
 | Ticket link | First line, under a Jira tracker: the full URL, built from the bindings' recorded site and the ticket's key — e.g. `https://apptension.atlassian.net/browse/GA-240` for this repo's own site and a `GA-240` ticket, never a fixed site pasted from this example | A reviewer opens the ticket from the PR, and the URL records which site this ran against |
 | Summary | What changed and why — ≤ 3 sentences | — |
-| Design decision | Design track: the design in ≤ 2 sentences plus the spec reference. Direct track: the reason it met all four criteria. Micro track: the named surface, and whether promotion fired | Makes the gate judgment auditable afterwards |
+| Design decision | Design track, full mode: the design in ≤ 2 sentences plus the spec reference. Design track, reduced mode: the same two sentences and no spec reference, because the harness holds the plan and nothing lands in the repo to link. Direct track: the reason it met all four criteria. Micro track: the named surface, and whether promotion fired | Makes the gate judgment auditable afterwards |
 | Experience | For UI changes: states, imagery (or no-art), motion/a11y notes, 360×640 / theme checks. Write "N/A — no user-facing UI" otherwise | Prevents craft from vanishing on the direct track |
-| Verification | `command → result` lines, no prose | Evidence, not assertion — see `superpowers:verification-before-completion` |
+| Verification | `command → result` lines, no prose | Evidence, not assertion. `superpowers:verification-before-completion` states the discipline where it is available, and the field is mandatory either way |
 | Left undone | A list of what is deferred or out of scope, or "Nothing" | Prevents silent scope-narrowing |
 
 The full URL rather than the bare key, because Jira's integration already

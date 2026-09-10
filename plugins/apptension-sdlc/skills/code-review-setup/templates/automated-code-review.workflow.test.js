@@ -91,7 +91,6 @@ test('automated review workflow keeps its round cap, provider, permission, and c
   assert.match(claude, /each\s+earlier actionable\s+finding/i);
   assert.match(claude, /addressed or\s+remains unresolved/i);
   assert.match(claude, /location and reason/i);
-  assert.match(claude, /never resolve review\s+threads/i);
   assert.match(claude, /already-commented[\s\S]*same current head/i, 'Claude may skip only when an automated review already targets the current head');
   assert.match(claude, /older head[\s\S]*do not stop/i, 'Claude must continue later rounds after a push');
   assert.match(claude, /rm -rf -- \.review-context\n\s+mkdir -- \.review-context/, 'Claude must replace an untrusted context symlink before writing');
@@ -101,6 +100,7 @@ test('automated review workflow keeps its round cap, provider, permission, and c
   assert.doesNotMatch(claude, /mcp__github_inline_comment__create_inline_comment/);
   assert.match(claude, /--json-schema/);
   assert.match(claude, /Set outcome to "failed"/);
+  assert.match(claude, /addressed_comment_ids to an empty array/, 'a round confirming nothing addressed must still emit the field');
   const inlineSchema = claude.match(/--json-schema '([^\n]+)'/);
   assert.ok(inlineSchema, 'Claude must receive a JSON schema');
   const { $schema, ...sharedSchema } = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
@@ -169,7 +169,7 @@ test('automated review workflow keeps its round cap, provider, permission, and c
   assert.match(codexPrompt, /each\s+earlier actionable\s+finding/i);
   assert.match(codexPrompt, /addressed or\s+remains unresolved/i);
   assert.match(codexPrompt, /location and reason/i);
-  assert.match(codexPrompt, /never resolve review\s+threads/i);
+  assert.match(codexPrompt, /addressed_comment_ids`? to an empty array/, 'a round confirming nothing addressed must still emit the field');
   assertCodexEnvironment(codexPrompt);
   assert.match(codex, /working-directory: pull-request/);
 
@@ -211,7 +211,9 @@ test('automated review workflow keeps its round cap, provider, permission, and c
   assert.match(poster, /reviewedHeadSha: review\.head_sha/);
   assert.match(poster, /MAX_ROUNDS: \$\{\{ vars\.AUTOMATED_REVIEW_ROUNDS \|\| 3 \}\}/);
   assert.match(poster, /maxRounds: Number\(process\.env\.MAX_ROUNDS\)/);
-  assert.doesNotMatch(poster, /resolveReviewThread/i, 'review threads must never be resolved automatically');
+  assert.match(poster, /^\s+resolveAddressedThreads,$/m, 'the publisher must import the thread resolver');
+  assert.match(poster, /const posted = await postReview\(/);
+  assert.match(poster, /if \(posted\) \{\n\s+await resolveAddressedThreads\(\{/, 'a round that published no review must resolve nothing');
 
   const aggregate = job(workflow, 'review-complete');
   assert.match(aggregate, /if: \$\{\{ always\(\) \}\}/);
@@ -233,7 +235,11 @@ test('automated review workflow keeps its round cap, provider, permission, and c
   assert.match(validator, /\[\[ "\$ACTOR" == \*'\[bot\]' && "\$ACTOR" != 'claude\[bot\]' \]\]/);
   assert.ok(validator.indexOf('name: Reject untrusted bot actors') < validator.indexOf('id: provider'), 'bot guard must run before provider validation and the wildcard action allowlist');
   assert.match(aggregate, /permissions: \{\}/);
-  assert.doesNotMatch(workflow, /resolveReviewThread/i, 'workflow must never resolve review threads automatically');
+  assert.equal(
+    (workflow.match(/resolveAddressedThreads/g) || []).length,
+    (poster.match(/resolveAddressedThreads/g) || []).length,
+    'only the write-scoped publisher resolves review threads',
+  );
 });
 
 test('each review provider interpolates only its own model and effort variables', () => {
@@ -274,7 +280,11 @@ function assertLaterRoundThreadPushback(prompt, label) {
   assert.match(prompt, /no code change/i, `${label} must treat valid pushback as addressed without a code change`);
   assert.match(prompt, /invalid pushback/i, `${label} must keep invalid pushback unresolved`);
   assert.match(prompt, /why the reply fails/i, `${label} must name why invalid pushback fails`);
-  assert.match(prompt, /never resolve review\s+threads/i, `${label} must not resolve GitHub review threads`);
+  assert.match(prompt, /addressed_comment_ids/, `${label} must name the threads it confirms addressed`);
+  assert.match(prompt, /rooting each thread whose finding this round confirms addressed/i, `${label} must name a thread by the comment rooting it`);
+  assert.match(prompt, /trusted\s+publisher resolves exactly those threads/i, `${label} must leave the resolving to the trusted publisher`);
+  assert.match(prompt, /Re-filing a\s+finding is the opposite\s+verdict/i, `${label} must treat a re-filed finding as the opposite verdict`);
+  assert.match(prompt, /leave\s+its thread open for the author/i, `${label} must leave a re-filed finding's thread open`);
 }
 
 test('review schema requires every object property and models optional values as nullable', () => {
@@ -296,6 +306,8 @@ test('review schema requires every object property and models optional values as
   assert.equal(schema.additionalProperties, false);
   assert.deepEqual(schema.properties.outcome.enum, ['reviewed', 'skipped', 'failed']);
   assert.deepEqual(schema.properties.head_sha.type, ['string', 'null']);
+  assert.equal(schema.properties.addressed_comment_ids.maxItems, 50);
+  assert.deepEqual(schema.properties.addressed_comment_ids.items, { type: 'integer', minimum: 1 });
   assert.equal(finding.additionalProperties, false);
   assert.equal(finding.properties.body.pattern, '\\S');
   assert.deepEqual(schema.properties.summary.type, ['string', 'null']);

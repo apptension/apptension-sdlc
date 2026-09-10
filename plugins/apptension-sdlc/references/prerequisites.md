@@ -1,17 +1,17 @@
-# Required plugins
+# Plugins and connectors
 
 Some processes here are written on top of skills another plugin ships. This
 page is the one place that records which, so a skill can point at it
 instead of leaving the dependency implicit in its prose.
 
-An agent reads this page when composing a stop about a missing plugin or
-connector. A human reads it before installing.
+An agent reads this page when a plugin or connector is missing, to compose
+the stop or to announce reduced mode. A human reads it before installing.
 
 ## The list
 
-| Plugin | Install from | Required by | What breaks without it |
+| Plugin | Install from | Used by | What changes without it |
 |---|---|---|---|
-| `superpowers` | `superpowers@<the Apptension marketplace you added>` | `dev-flow`, `pr-checks` | The design track (`brainstorming`, `writing-plans`), implementation under `test-driven-development`, the failure route to `systematic-debugging`, `verification-before-completion`, and `receiving-code-review` in the monitor loop |
+| `superpowers` | `superpowers@<the Apptension marketplace you added>` | `dev-flow`, `pr-checks` | Both run [reduced mode](#running-without-superpowers): the design track uses the harness's plan mode, and every step that would call a skill states its discipline inline |
 
 Whichever Apptension marketplace you installed this plugin from also carries
 `superpowers`: `apptension-sdlc` publicly, `apptension-dev` inside Apptension.
@@ -92,6 +92,14 @@ site is Cloud *and* granted to this account, and here is the site list to
 scope against. `dev-flow` makes this call at pre-flight, before it cuts a
 branch or assigns anything.
 
+**The same site can appear twice.** `getAccessibleAtlassianResources()`
+returns one entry per scope group, Confluence and Jira granted separately,
+so an account with both appears once for each. Match the hostname *and*
+confirm the matching entry carries Jira scopes — a Confluence-only entry
+for the same site is not Jira access, however clean the hostname match
+looks. Never treat one entry as "not granted" or two as a duplicate to
+worry about.
+
 **Cloud only, and the resource list is the only test for it.** Do not test
 the hostname: Jira Cloud supports custom domains, so a client on
 `jira.client.com` is Cloud and a hostname rule would reject them as Data
@@ -100,7 +108,7 @@ it — but that is a limitation to state, not a thing this can detect.
 
 ### What each failure means
 
-Four classes, four different next actions for the human. They are not
+Six classes, six different next actions for the human. They are not
 interchangeable, and a stop that names the wrong one sends someone to fix
 something that is not broken.
 
@@ -109,7 +117,9 @@ something that is not broken.
 | No tool list in the harness | Cannot verify anything | Fail closed: this harness cannot confirm the connector, so the Jira path is unavailable here |
 | No tool ending in `getJiraIssue` | Not connected | Connect the Atlassian connector (below), then start again |
 | Any call returns 401 or 403 | Connected, session dead | **Sign in again.** Installing changes nothing — the tools are already there |
-| Site absent from the resource list | Not Cloud, or not granted | Either that site is not Jira Cloud (Data Center is unsupported), or this account has not been granted it — check which |
+| Site missing, and the call returns `isn't explicitly granted by the user` | Consent not given for that site | Redo consent and select every site needed. Consent is per site |
+| Site missing, and it won't open in a browser either | No account access | The account genuinely lacks access. Its admin has to grant it |
+| Site missing, consent granted, still absent | Not Cloud, or app restricted | Either it is not Jira Cloud (Data Center is unsupported), or the site restricts third-party apps and its admin has not approved this one |
 
 ### Connecting it, per harness
 
@@ -144,37 +154,58 @@ plugin would send the human to an install command that changes nothing.
 
 This is stated once, here, rather than repeated at each step that needs it.
 
-## When one is missing
+## When the session cannot be read
 
-Stop. Say three things, then wait for the human:
+A harness that exposes no skill listing **fails closed**, the same way the
+Atlassian check above does. There is no way to tell "not installed" from
+"cannot see", and reduced mode is a weaker process than the full one, so
+guessing there silently downgrades a developer who has `superpowers`
+installed.
 
-- which plugin is missing;
-- which step needed it, and what that step would otherwise have done;
-- the install path for the harness in use, verbatim, from the per-harness
-  table above — never the Claude Code slash command in a session that isn't
-  Claude Code.
+Stop. Say the harness cannot report its own skills, and ask the human
+which mode to run.
+
+## Running without superpowers
+
+`superpowers` is recommended. A session without it runs **reduced mode**:
+every step that would call one of its skills has a fallback, and the flow
+takes a ticket to a draft pull request as usual.
+
+Say it once, at pre-flight, then run. Three things:
+
+- that `superpowers` is absent and the run continues in reduced mode;
+- what the mode changes, in one clause;
+- the install path for the harness in use, verbatim from the per-harness
+  table above, so the full track stays one command away.
 
 Under Claude Code:
 
-> `dev-flow` needs `superpowers`, which isn't available in this session — its
-> design gate, TDD, and debugging steps are all its skills. Install it with
-> `/plugin install superpowers@apptension-sdlc` and start again.
+> `superpowers` is not available in this session. Running in reduced
+> mode: the design track uses this harness's plan mode, and steps 6, 7
+> and 9 use their inline equivalents. Install it with
+> `/plugin install superpowers@apptension-sdlc` for the full track.
 
-Under Cursor, the same stop ends "install `superpowers` from the Apptension
-marketplace you already added, then start again"; under Codex, the same; under
-OpenCode, with "add
-`superpowers@git+https://github.com/obra/superpowers.git` as a separate package
-in `opencode.json`, then restart OpenCode and start again"; under Pi, with
-"`pi install git:github.com/obra/superpowers`, then restart pi and start
-again." The first two things to say do not change.
+Once, not per step. A run that announces the substitution every time it
+reaches one spends tokens telling the developer something they chose.
 
-**Stop before the first side effect, not at the step that needs the skill.**
-The point of checking at pre-flight is that a flow which stops later has
-already cut a branch, moved a board card, and assigned the issue — leaving a
-repo that looks worked-on and an issue owned by someone who did nothing. See
-`dev-flow` step 2 for where the check sits relative to those.
+Reduced mode is not a licence to skip a step. It changes how a step is
+carried out, never whether it happens: the design gate keeps all three
+tracks and every criterion, pre-flight keeps all of its checks, and the
+craft checklist and verification are untouched.
 
-Do not degrade gracefully. There is no fallback path for a missing required
-plugin: a design gate that skips brainstorming because the skill was absent
-has taken the direct track without the human's confirmation, which
-`dev-flow` sanctions only explicitly.
+### What reduced mode gives up
+
+Worth knowing before choosing it, and worth stating rather than leaving a
+developer to discover:
+
+- Nothing lands in the repository. The harness may write a plan of its own
+  wherever it keeps one, but no spec or plan reaches the repo, so the pull
+  request's `Design decision` field carries two sentences and no file
+  reference.
+- An interrupted session restarts the design gate. On the full track a
+  spec file survives for the next session to read, and a plan the harness
+  holds does not.
+- One round of clarifying questions rather than the one-question-per-message
+  loop `brainstorming` runs, which catches less.
+- Weaker enforcement. On a harness with no plan mode, only the agent's own
+  discipline stops an edit before the human approves.

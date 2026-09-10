@@ -182,6 +182,13 @@ when changed files include user-facing UI.
 - Public APIs, complex logic, non-obvious decisions documented?
 - Docstrings present where project convention expects them?
 - Behavior changes or new features that need a docs update?
+- Verify paths and commands named in changed docs against the reviewed tree.
+  Read the implementation or configuration behind each claimed mechanism.
+- Flag changed lines that present a missing path, command, or mechanism as
+  existing behavior. State what you checked and what contradicts the claim.
+  Do not ask the author to elaborate an unverified claim.
+- Leave claims explicitly marked as not built yet unflagged for the missing
+  implementation.
 
 **4g. Product experience** *(UI files only)*
 

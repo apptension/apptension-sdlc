@@ -201,6 +201,15 @@ Every install keeps, unchanged:
   eight minutes beyond the step timeout for setup and publishing.
 - A review contains at most 50 inline findings, the maximum GitHub
   accepts in one review request; larger provider output fails validation.
+- Thread resolution stays with the publisher. A round names the threads
+  it confirms addressed by the id of the comment rooting each one, so
+  its output carries no handle that resolves anything by itself, and the
+  publisher resolves one only after checking that the comment belongs to
+  a review this workflow itself submitted on this pull request — the bot
+  login alone is not enough, since every workflow using the hosting
+  token shares it — that the thread is still unresolved, and that this
+  round re-filed no finding at its location. A rejected id or a failed
+  API call warns and leaves the published review successful.
 
 An edit to any of these is a security decision for the repo's owner,
 not a substitution this skill performs.
