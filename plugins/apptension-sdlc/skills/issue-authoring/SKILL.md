@@ -1,6 +1,6 @@
 ---
 name: issue-authoring
-description: Use when drafting a new issue for the target repo's tracker — filing it directly via `gh issue create` under GitHub, against `.github/ISSUE_TEMPLATE/task.yml` with the area conveyed as a label instead of the form's dropdown, or via `createJiraIssue` under Jira — with acceptance criteria that describe shipped work rather than a design-only outcome. Trigger on intent like "file an issue for X", "draft a GitHub issue", "let's write up this issue", or "open a task for this".
+description: Use when drafting a new issue for the target repo's tracker — filing it directly via `gh issue create` under GitHub, against `.github/ISSUE_TEMPLATE/task.yml` with the area conveyed as a label instead of the form's dropdown, or via `jira_create_issue` under Jira — with acceptance criteria that describe shipped work rather than a design-only outcome. Trigger on intent like "file an issue for X", "draft a GitHub issue", "let's write up this issue", or "open a task for this".
 requires:
   - id: area-labels
     label: An area taxonomy applied to issues
@@ -21,15 +21,36 @@ requires:
 
 How to draft a well-formed issue for the target repo's tracker, and file it —
 against `.github/ISSUE_TEMPLATE/task.yml` with `gh issue create` under
-GitHub, or with `createJiraIssue` under Jira. A human or an agent filing
+GitHub, or with `jira_create_issue` under Jira. A human or an agent filing
 the next issue follows this before typing a title.
+
+## Filing needs a human's yes
+
+An agent runs `gh issue create` or `jira_create_issue` only after a human
+has approved that specific issue. Draft it in full — title, body, and
+label under GitHub; summary and description under Jira, which has no
+label to draft — put it in front of them, and wait. Approval is per
+issue: a yes to one is not a yes to the next, and "file whatever you
+find" is not a yes to any of them.
+
+That binds the issue an agent was asked for and the issue it thought of on
+its own, and the second is the case this exists for. A problem noticed
+while working something else reaches the human as a finding, not the
+tracker as a ticket — `dev-flow` step 6 says how one is carried there and
+step 9 is where it is offered.
+
+This is not `setup`'s gate. `setup` proposes issues the human asked it to
+find, prints the whole candidate table up front, and takes one
+confirmation over rows the human already dropped or edited — a different
+mechanism, for a different case, that predates this rule and is not read
+against it.
 
 ## This run ends when the issue exists
 
-Treat the user's message as the issue's subject. Draft the issue, file it
-on the tracker. On GitHub, post the agent-context comment when there is
-execution detail. Stop. Done is the issue URL, plus the agent-context
-comment on GitHub when one was needed.
+Once that approval is in, treat the user's message as the issue's subject.
+Draft the issue, file it on the tracker, and post the agent-context comment
+when there is execution detail. Stop. Done is the issue URL, plus that
+comment when one was needed.
 
 Once this skill is already in context, the user's message is the subject
 even when it never says "file".
@@ -295,25 +316,35 @@ EOF
 
 ## Filing under Jira
 
-No `gh` call runs on this path — not `gh issue create`, not even a
-read like `gh label list` — the same rule the `setup` skill states for a
-non-GitHub tracker. File directly with `createJiraIssue`:
+No `gh` call runs on this path, not `gh issue create` and not even a read
+like `gh label list`, the same rule the `setup` skill states for a
+non-GitHub tracker. File directly:
 
-    createJiraIssue(
-      cloudId: "<site, from the Issue tracker row>",
-      projectKey: "<project key, from the Issue tracker row>",
-      issueTypeName: "Task",
+    jira_create_issue(
+      project: "<project key, from the Issue tracker row>",
+      issuetype: "Task",
       summary: "<imperative summary, no [Task]: prefix>",
-      description: "<the body's five sections, unchanged>",
-      contentFormat: "markdown"
+      description: "<the body's five sections, unchanged>"
     )
 
-Read `projectKey` and `cloudId` off the `Issue tracker` row — recorded as
-`Jira, project key <KEY>, site <site>` — the same row `dev-flow` reads to
-scope its own Jira calls.
+`issuetype` is spelled in lower case, which is the field's own spelling
+and not a typo. It defaults to `Task` and is passed anyway, so the ticket
+does not silently change type if that default ever moves.
+
+Call the tool whose server is named `jira`, which is the entry the repo
+carries, or the single tool matching the `jira_get_issue` suffix when no
+server carries that name (see
+[which entry, when there are two](../../references/prerequisites.md#which-entry-when-there-are-two)).
+Read the project key off the `Issue tracker` row, recorded as `Jira,
+project key <KEY>, site <site>`. Pass `project` every time. A server
+entry serves every repo on its site and each of them has its own key, so
+a key left to the server's own default is right for one repo and quietly
+wrong for the rest.
+
+The call returns the new issue's key and URL.
 
 Drop the `[Task]: ` prefix from `summary`. `task.yml` supplies it on
-GitHub; under Jira, `issueTypeName: "Task"` already says so, and a
+GitHub; under Jira, `issuetype: "Task"` already says so, and a
 repeated prefix would say it twice.
 
 Carry the body's five sections into `description` unchanged — Context /
@@ -321,16 +352,14 @@ Why, What needs to be done, Acceptance Criteria, Related links, Out of
 scope — as markdown headings, the same shape the `gh issue create` body
 above writes.
 
-Jira's markdown conversion degrades one line: a `- [ ]` item in
-Acceptance Criteria does not become a Jira checkbox. It stores
-`* \[ \]` — an ordinary bullet with the brackets escaped — so the
-checklist files as plain bullets, not tickable task items. Headings,
-inline code, and quotes all survive the same conversion; only the task
-list markup does not. Making it tickable needs `contentFormat: "adf"`
-and a hand-built ADF document for the whole description — a format this
-toolkit does not use anywhere else — so this skill keeps markdown
-instead. File the checklist as written, and expect Jira to show it as
-bullets that a reviewer reads down, not checkboxes they click.
+Markdown task-list items are outside the converter's documented safe
+subset, which covers headings, bold and italic, lists, code blocks, inline
+code, links, blockquotes, rules and flat tables. So a `- [ ]` line in
+Acceptance Criteria files as an ordinary bullet rather than a tickable
+Jira task item. The server reports conversion differences in the
+response's `hints`, so read them on the first filing against a new site
+rather than assuming what survived. File the checklist as written and
+expect a reviewer to read down it rather than click it.
 
 No area label exists to apply either, since labels are a GitHub concept.
 Leave the area untagged until the target repo decides what an area becomes
@@ -343,12 +372,15 @@ constraints, design notes — is noise to a human reader and necessary to an
 agent. It goes in a comment on the issue, not the body.
 
 - Start the comment with a bolded `**Agent context**` line. That is how
-  `dev-flow` finds it.
-  The same convention holds in a Jira comment, and `dev-flow` reads it the
-  same way — it fetches Jira comments as markdown for exactly that reason.
-  Writing this comment into Jira stays out of scope: it needs
-  `addCommentToJiraIssue`, which [Filing under Jira](#filing-under-jira)
-  above does not call. Filing the issue itself into Jira is covered there.
+  `dev-flow` finds it. Under Jira the same convention holds and
+  `dev-flow` reads it the same way, with one difference worth knowing:
+  the server stamps a visible marker into the first paragraph of every
+  comment it posts, on the same line. It defaults to `:claude:` and an
+  entry can set it to any other non-empty string, but no setting removes
+  it. So the posted comment reads `:claude: **Agent context** ...`, and
+  `dev-flow` matches on the first line **containing** the bolded label
+  rather than starting with it. Write the line exactly as below and let
+  the marker land in front of it.
 - Optional. Write one only when there is real execution detail.
 - No length limit.
 
@@ -360,6 +392,14 @@ gh issue comment <N> --body "$(cat <<'EOF'
 EOF
 )"
 ```
+
+Under Jira the same comment is one call, on the same server entry that
+filed the issue:
+
+    jira_comment(
+      issueKey: "<the key jira_create_issue returned>",
+      body: "**Agent context** — execution detail, not part of the ask.\n\n<file table, commands, IDs, constraints>"
+    )
 
 ## UI / experience acceptance criteria
 

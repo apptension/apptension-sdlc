@@ -230,7 +230,9 @@ inline comments, and each thread's `isResolved`.
   the round triaged, post a reply on that thread:
   - a fix names the addressing commit;
   - pushback is the reasoned disagreement;
-  - a follow-up issue names the filed issue.
+  - a follow-up issue names the filed issue;
+  - left undone names the `Left undone` line the finding was recorded as,
+    for a non-blocking finding the human did not approve filing.
   The last-handled marker advances only when every finding has that
   reply. A commit without an inline reply does not count as addressed.
   A PR conversation comment is not a substitute.
@@ -376,16 +378,22 @@ reviewer waits on changes nobody needed.
 So the loop **triages the round before working it**, which
 `superpowers:receiving-code-review` already equips it to do. Under reduced
 mode nothing equips it, so the triage is the loop's own job and the split
-below is the whole of the instruction. Blocking findings
-are fixed in this PR. Non-blocking ones become **follow-up issues**, filed with
-enough context to act on and linked from the PR, and they are named in the PR
-body's `Left undone` field — which `dev-flow` already requires and which exists
-for precisely this.
+below is the whole of the instruction. Blocking findings are fixed in this
+PR. A non-blocking one is never filed on its own: it goes to the human as
+a drafted candidate — title, body, label under GitHub; summary and
+description under Jira, which has no label — per `issue-authoring`'s
+gate, and only an explicit yes runs `gh issue create` or `jira_create_issue`.
+One the human doesn't approve is named in the PR body's `Left undone`
+field instead: fetch the current body, add the finding's line under that
+section, and push the result with `gh pr edit <N> --body-file <path>` —
+the field already exists for precisely this, and the edit is a PR-body
+API call, not a commit.
 
 Every finding still gets an inline reply on its thread. What changes is
-that some replies are "filed as #N" rather than a commit. Deferring is a
-decision the loop states on the thread, never a silence and never a PR
-conversation comment.
+that some replies are "filed as #N" under GitHub or "filed as
+<ticket URL>" under Jira, others "left undone", and neither happens
+without that approval. Deferring is a decision the loop states on the
+thread, never a silence and never a PR conversation comment.
 
 **Stop conditions**, deliberately simple, no auto-idle heuristics: the
 human explicitly says stop; the PR is closed or merged; the loop runs out of

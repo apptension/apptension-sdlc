@@ -14,12 +14,17 @@ the human running setup is a guest in it, holding one contractor's
 access. Step 0 establishes which case this is, because it changes what
 setup is willing to file.
 
-The output is three things: a `### Dev flow bindings` section written
-into the repo's `CLAUDE.md`, one issue filed per remaining gap, and a
-summary of what it could not determine. Nothing is written and nothing
-is filed before the human has seen what setup proposes — the drafted
-bindings, and the issues or the backlog that go with them — and
-approved it.
+The output is four things: a `### Dev flow bindings` section written
+into the repo's `CLAUDE.md`, a `.mcp.json` Jira server entry at the repo
+root where the tracker is Jira, a site is recorded, and any existing
+`.mcp.json` parses as JSON, one issue filed per remaining gap, and a
+summary of what it could not determine. Nothing is
+written and nothing is filed before the human has seen what setup proposes
+and approved it: the drafted bindings, the server entry where there is one,
+and the issues or the backlog that go with them.
+
+The server entry is conditional and the other three are not, so a
+GitHub-tracked repo sees the original three and nothing about it changes.
 
 ```mermaid
 flowchart TD
@@ -31,7 +36,7 @@ flowchart TD
     D -- no --> F[Draft bindings + issue table]
     F --> G{Human approves?}
     G -- no --> H[Stop, change nothing]
-    G -- yes --> I[Write bindings uncommitted, file issues]
+    G -- yes --> I[Write bindings + Jira server entry uncommitted, file issues]
     I --> J[Print summary]
 ```
 
@@ -602,6 +607,114 @@ nothing before this row existed — there is no predecessor behaviour to
 fall back to, so there is nothing to fall back *to*. A row with a
 predecessor never earns this.
 
+### The Jira server entry belongs to the repo
+
+Under a Jira tracker, compose `.mcp.json` for the repository root
+alongside the bindings table. It carries the one server every skill here
+reads Jira through, so a teammate cloning the repo installs nothing and
+retypes no site. A GitHub-tracked repo composes none, and its absence
+there is correct rather than a gap.
+
+```json
+{
+  "mcpServers": {
+    "jira": {
+      "command": "sh",
+      "args": ["-c",
+               "unset JIRA_EMAIL JIRA_API_TOKEN; exec npx -y --package=lean-jira-mcp@0.1.1 -c 'set -a; . \"${XDG_CONFIG_HOME:-$HOME/.config}/jira-mcp/env\" || exit 1; set +a; exec lean-jira-mcp'"],
+      "env": {
+        "JIRA_BASE_URL": "https://<host>",
+        "JIRA_MCP_ATTACHMENT_MAX_BYTES": "26214400",
+        "JIRA_MCP_ATTACHMENT_UPLOAD_MAX_BYTES": "26214400"
+      }
+    }
+  }
+}
+```
+
+**`--package=<name> -c` is load-bearing.** It installs the package before
+it runs the command string, so the credential file is sourced once any
+install script has already finished. `npx -y lean-jira-mcp` does not have
+that property.
+
+**`sh` is the command, not `npx`, and the order is the point.** The shell
+clears `JIRA_EMAIL` and `JIRA_API_TOKEN`, then `exec`s `npx`, so npm and
+every lifecycle script in the dependency tree start with both empty
+whatever the operator exported. Running `npx` first installs the package
+before anything can clear them, which is why the clearing cannot live
+inside the string `npx -c` runs.
+
+**`JIRA_BASE_URL` is built from the recorded host.** `Issue tracker`
+records `Jira, project key <KEY>, site <site>`, where `<site>` is a bare
+host, such as `your-company.atlassian.net` or a custom domain on a Cloud
+instance. The value is `https://` followed by that host verbatim, with a
+leading scheme stripped when a human typed one, so the prefix is never doubled.
+Appending `.atlassian.net` to the recorded value is wrong twice over: it
+doubles the suffix, and it cannot express the custom domain Jira Cloud
+allows.
+
+**A site of `unknown` composes no file.** There is nothing to point the
+entry at, and an entry aimed at a guessed host reads every ticket from
+somewhere nobody named. Report it on the `Could not determine` line, the
+way any unresolved value is reported.
+
+**The credential is the person's, not the repo's.** Each person writes
+`${XDG_CONFIG_HOME:-$HOME/.config}/jira-mcp/env` once per machine, mode
+600, holding `JIRA_EMAIL` and `JIRA_API_TOKEN`. One file serves every
+project on that Atlassian account. Nothing about it is composed here and
+nothing about it is committed.
+
+**An existing `.mcp.json` keeps everything that is not this entry.**
+Replace `mcpServers.jira`; leave every other server and every other
+top-level key exactly as they are. A file that does not parse as JSON is
+left untouched and reported. A hand-made entry someone is mid-edit on is
+worth more than this one.
+
+**The approval belongs to the repo too.** Claude Code starts no project
+server until somebody says so, and it reads that consent from
+`enabledMcpjsonServers` in `.claude/settings.json`. Compose that key
+alongside the entry, holding `jira`, so a teammate who clones the repo
+gets a working server rather than a prompt. Without it the prompt lives
+only in the interactive `claude` in a terminal, which a teammate working
+in the desktop app cannot answer at all: it lists the entry as pending and
+offers nothing to click. An existing `.claude/settings.json` keeps every
+other key, the same rule as the entry above, and one that does not parse
+as JSON is left untouched and reported.
+
+**What that consent covers.** Claude Code matches it by server name, so a
+later edit to the entry's command runs without asking again. The team is
+trusting whoever can push to this repo, which is the same trust a
+`postinstall` script or a CI workflow here already carries. That is why
+the key belongs in a repo whose maintainers the team already trusts, and
+why nothing here writes it into a repo the operator does not control.
+
+**The file is the repo's, whichever harness composes it.** Only Claude
+Code reads `.mcp.json`, so a run under Cursor, Codex, OpenCode or Pi
+composes a file its own session will never load. Compose it anyway. The
+artifact belongs to the repository and serves every Claude Code teammate
+who clones it, and a repo configured differently depending on who happened
+to run setup is worse than one configured the same way every time.
+
+Say what the running harness needs of its own, on the line the other
+findings use, so the operator learns it here rather than at their first
+ticket:
+
+| Harness | What the operator still does |
+|---|---|
+| Claude Code | Nothing. The composed file is what this session reads |
+| Cursor | Write the same entry into `.cursor/mcp.json` |
+| Codex | Write the same entry into `.codex/config.toml` |
+| OpenCode, Pi | Write the same entry in that harness's own MCP shape |
+
+**Name the entry `jira` in every one of them.** The name is what tells
+`dev-flow` which entry this repo's tickets live on, so it has to hold
+under whichever harness the next person uses. An entry under another name
+is indistinguishable from a second Jira that person keeps for their own
+sites, and a session holding both stops rather than guess.
+
+Composing is not writing. The gate in step 5 shows the file and releases
+it, the same as every other write this skill makes.
+
 ### `Default branch` and `Branching model` answer different questions
 
 Two branch-shaped rows now sit next to each other, so say what separates
@@ -890,7 +1003,7 @@ confidently, an existing binding already does, or the answer above just
 confirmed it — but no site is recorded yet. Every Jira call this flow
 makes is scoped to one site, and a call scoped to the wrong one reads or
 moves a ticket in another company's Jira. Name the site —
-apptension.atlassian.net, or your own custom domain if the Cloud instance
+your-company.atlassian.net, or your own custom domain if the Cloud instance
 has one — or press enter to leave it unknown.
 Tracker statuses: Jira status names are the project's own, so this flow
 cannot guess them. Name the status this workflow puts started work into,
@@ -900,22 +1013,66 @@ there is no review status, say none for the second one. Press enter to
 leave the row unknown.
 ```
 
-**`setup` never calls the Atlassian MCP.** It runs against a repo with no
-guarantee a connector is attached, and reading statuses from
-`getTransitionsForJiraIssue` would be worse than asking anyway: that call
-returns the exits from *one ticket's current status*, so a ticket sitting
-in a testing status shows the statuses either side of it and never the
-review status three steps back. A proposal built from that list would be
-confident and incomplete. The human answers in one line; the connector
-gets exercised by `dev-flow`, which needs it regardless.
+**`setup` derives no status from a call.** `jira_describe_project(projectKey,
+issueType)` returns that issue type's statuses and its named transition
+graph, but setup does not know which issue type this repo's tickets use,
+and which status counts as "started work" and which as "up for review" is
+a human judgment about the team's workflow, not something a status list
+answers. The human answers in one line.
+
+**It does make one call, to check the credential, when the server is
+unambiguous.** A tool whose server is named `jira`, or a single matching
+tool, means the check runs. Under a Jira tracker, once the project key is
+known:
+
+    jira_describe_project(projectKey: "<key>")
+
+A rejected token fails here, with `401` in the message and no error code,
+while somebody is sitting at the keyboard configuring, which is the
+cheapest moment to find it. A working token echoes the project's name back, which
+catches a typo in the key before it reaches the bindings. Report either
+outcome on the line the other findings use and carry on: neither is a
+reason for `setup` to stop.
+
+Two or more tools match and no row names one: the check is skipped rather
+than run against a guess, since calling either tool risks validating the
+credential against another client's Jira. Report it on the `Could not
+determine` line, the way a check that did not run already is. See
+[the prerequisites reference](../../references/prerequisites.md#the-jira-mcp-server).
+
+**The first setup of a Jira repo usually makes no call at all.** The check
+runs against a tool in this session's own list, and a person configuring a
+repo whose server entry did not exist until this run has none. Composing
+`.mcp.json` does not change that: a project server cannot be started
+mid-session, so the entry setup is about to write exposes no tool in the
+run that writes it.
+
+Report it on the same line, and name what actually closes the gap, which
+is not a restart on its own. Under Claude Code the operator restarts and
+approves the project server once. Under Cursor, Codex, OpenCode or Pi they
+write their own entry, per the table above, since none of them reads
+`.mcp.json`. The next run after the active harness can reach Jira makes
+the call and echoes the project's name back. Until then the first ticket
+read proves the credential, which is where `dev-flow` already gets its
+proof. This is not a reason to stop, and
+it is not a reason to skip the write. The entry is what makes the next run
+able to check anything.
+
+**No row records which server to use.** The entry the repo carries is
+named `jira`, and that name is what `dev-flow` and `issue-authoring`
+resolve against, so recording it a second time in the bindings would
+duplicate what `.mcp.json` already says and go stale on its own. A person
+who keeps a second Jira entry of their own gave it another name, and two
+entries cannot share one, because a session's server names are its tool
+prefixes.
 
 An answer replaces the row's value in the table that is about to be
 printed. No answer leaves the row `unknown` and it is reported on the
-`Could not determine` line like any other. None of the questions above is
-a reason for **setup** to stop, and none is asked for a row step 1
-already resolved with confidence. A Board row that already names a
-board view is resolved; a Board row that names a project and no view
-is not.
+`Could not determine` line like any other. None of the
+questions above is a reason for **setup** to stop, and none is asked for
+a row step 1 already resolved with confidence. A Board row that already
+names a board view is resolved; a Board row that names a project and no
+view is not.
 
 What the `Branching model` question warns about is a later stop
 in `dev-flow`, which is a different process and stops for its own reasons
@@ -1107,30 +1264,48 @@ On `yes`, do these things in this order, and nothing else:
    target file, and leave it uncommitted. Unconditional — the deviation
    path records the bindings too. Stop at the write: no staging, no
    commit, no branch, no push.
-2. Only when the tracker is GitHub Issues, create the dedup label,
+2. Only when step 4 composed a `.mcp.json`, write it to the repository
+   root and write `enabledMcpjsonServers` into `.claude/settings.json`,
+   both uncommitted. Stop at the write, as for the bindings.
+
+   Step 4 composes nothing in three cases, and each of them reaches here
+   as "no file to write" rather than as a reason to improvise one: the
+   tracker is not Jira, the site is `unknown`, or the existing
+   `.mcp.json` does not parse as JSON. The third is the one worth naming
+   here, because a file is present and this step must still not touch it.
+   Report that outcome in the summary's `Written` group alongside what
+   was written, so an operator whose entry was left alone learns it from
+   the run rather than from their first ticket.
+3. Only when the tracker is GitHub Issues, create the dedup label,
    once:
 
    ```bash
    gh label create repo-setup --description "Repository setup gap" || true
    ```
 
-3. Only when the tracker is GitHub Issues, run `gh issue create` for
+4. Only when the tracker is GitHub Issues, run `gh issue create` for
    each approved row, in table order.
-4. Run each installer the questions above queued, in the order they were
+5. Run each installer the questions above queued, in the order they were
    asked: `code-review-setup`, then `install-task-template`. Each one's
    own gate governs every file and variable it touches, so these writes
    are approved twice, not zero times.
 
-5. When verification maintenance was approved for installation, invoke
+6. When verification maintenance was approved for installation, invoke
    `setup-verification-maintenance` with the approved configuration and rendered
    files. Reuse that approval when the files match; a changed proposal returns
    to the gate. Leave the install uncommitted, like the bindings.
 
-Items 2 and 3 do not run against any other tracker — not even the label
+Item 2 runs on both the team and the `solo` answers to step 0. The file
+commits nobody to a paid credential and grants no write scope over
+anything, and it lands uncommitted in the working tree for the operator to
+land or drop, so the guest reasoning that holds back two of the issue rows
+does not reach it.
+
+Items 3 and 4 do not run against any other tracker — not even the label
 create, which is itself a write into the host. See "A non-GitHub
-tracker" below. Items 4 and 5 write repo files: `code-review-setup` and
+tracker" below. Items 5 and 6 write repo files: `code-review-setup` and
 `setup-verification-maintenance` run regardless of tracker.
-`install-task-template` reaches item 4 only under GitHub Issues, because
+`install-task-template` reaches item 5 only under GitHub Issues, because
 `.github/ISSUE_TEMPLATE` applies only to GitHub.
 
 On `no`, nothing happens at all: no file is written, no label is
@@ -1156,6 +1331,25 @@ into, so the list of gaps is yours to carry over wherever you track work.
 
 Write the CLAUDE.md table? (yes / no — enter accepts yes)
 ```
+
+**Under Jira the prompt names the server entry as a second effect**, and
+prints the file before asking, the way the orchestrator effect below
+already does. The paragraph reads: this repo also gains a `.mcp.json` at
+its root, holding the one Jira server entry every skill here reads tickets
+through, pinned to a version and pointed at the site above, and
+`.claude/settings.json` gains the key that lets it start without each
+teammate answering a prompt; both go into your working tree uncommitted
+alongside the table, and a teammate who lands them needs one credential
+file of their own and installs nothing. The question becomes `Write the
+CLAUDE.md table and the .mcp.json server entry? (yes / no — enter accepts
+yes)`.
+
+Where step 4 composed no file, this variant stays at its one original
+effect and its original wording, and the prompt promises nothing about
+`.mcp.json`. That covers a site recorded as `unknown` and an existing
+`.mcp.json` that does not parse. Say which of the two it was on the line
+the other findings use, since the second leaves a file in place that the
+operator may believe this run repaired.
 
 **This variant carries the orchestrator effect too, on the same terms as
 the GitHub one.** When the `Task orchestrator` row names a supported
@@ -1241,7 +1435,8 @@ dedup here anyway. Print the backlog as a markdown table and say
 plainly that it cannot file into that tracker, so the human knows the
 list is theirs to transfer rather than assuming it landed somewhere.
 The bindings are still written — uncommitted — released by the
-bindings-only prompt at the gate.
+bindings-only prompt at the gate, and under Jira the `.mcp.json` server
+entry goes with them on the same terms.
 
 The backlog lists every gap, including the ones step 0 held back on
 `solo`; those are marked as the repo owner's call rather than dropped.
@@ -1267,7 +1462,7 @@ to teach an operator to stop reading the summary.
 | Group | What it holds |
 |---|---|
 | Present | Entries the audit found, plus candidates the human confirmed |
-| Written | The bindings rows written, and to which file |
+| Written | The bindings rows written, and to which file, plus the `.mcp.json` server entry, the site it points at, and the `.claude/settings.json` approval key where a Jira tracker released them |
 | Filed | Issues created, with their numbers |
 | Reported, not filed | Gaps that produced no issue: `optional:` entries the audit found missing, entries step 0's `solo` answer held back, and rows the human dropped or declined at the gate |
 | `unknown` | Entries whose probe did not run, and why — and, separately, the bindings rows step 1 could not resolve |
@@ -1414,14 +1609,21 @@ words rather than as their labels above — `unknown` reads as a value in
 the table when the group holds two different things, and *Candidates*
 names a state the operator was never taught.
 
-Say what happens to each of the two things the run left behind, because
-setup does neither itself:
+Say what happens to each thing the run left behind, because setup does
+none of it itself. Two on every run, three where a Jira tracker released a
+server entry:
 
 - **The bindings table** is sitting uncommitted in the working tree, named
   by its file — `CLAUDE.md`, or `AGENTS.md` where step 4 wrote there —
   rather than as "the bindings", since this is the line that tells the
   operator there is something in their tree to deal with. They land it the
   way this repo lands any change.
+- **The `.mcp.json` server entry**, where one was written, is sitting
+  uncommitted beside the bindings and lands the same way. Name it
+  separately rather than folding it into the line above: it is the file
+  that makes every teammate's Jira work, so an operator who commits the
+  bindings and drops this one has configured the repo for nobody but
+  themselves.
 - **The filed issues** are worked one at a time through
   the `dev-flow` skill, like any other issue in the tracker
    — and now that the bindings row it needs exists, it has the values it
@@ -1436,6 +1638,27 @@ rather than needing a guard: step 5's skip is keyed on the `repo-setup`
 label, and the bindings write in step 5's post-approval sequence is
 idempotent — it updates the section in place. Re-running after a partial
 first run is therefore safe, and is the way to resume one.
+
+**Changing the tracker takes an edit first, then the re-run.** A run
+against a bound repo carries the existing `Issue tracker` row over, and a
+carried row skips the detection regex entirely, so a repo recorded as
+GitHub-tracked stays GitHub-tracked however its history now reads. That is
+deliberate: the regex must never override a value a human set. The
+consequence is that adopting Jira on an already-bound repo is two steps,
+and a re-run alone is not one of them.
+
+Tell the operator both, when they ask to move a bound repo onto Jira:
+
+1. Edit the `Issue tracker` row by hand to `Jira, project key <KEY>, site
+   <site>`.
+2. Re-run `setup`. The effective tracker is now Jira, so it asks for the
+   status names, checks the project key where a server already answers, and
+   composes `.mcp.json`.
+
+Detecting the switch instead was considered and does not work. A repo that
+has just moved to Jira has no Jira keys in its history yet, since the keys
+arrive with the work that follows, so there is nothing for the regex to
+find at the moment the answer is needed.
 
 One caveat on the `AGENTS.md` path: the `dev-flow-bindings` entry probes
 `CLAUDE.md`, so a repo whose bindings went to `AGENTS.md` reports that

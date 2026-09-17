@@ -1,5 +1,9 @@
 Closes #<N>
 
+<!-- agent-context -->
+<Keep this marker only when an Agent context comment follows. It tells the
+review workflow to wait for that comment. Delete the line otherwise.>
+
 ## Summary
 
 <What changed and why. Three sentences at most. Not a retelling of the issue.>
@@ -21,4 +25,4 @@ Closes #<N>
 
 ## Left undone
 
-<A list of what is deferred or out of scope. "Nothing" only when true.>
+<A list of what is deferred or out of scope, including every finding raised at step 9 and not filed, plus "Filed: #N" (GitHub) or "Filed: <ticket URL>" (Jira) for each one that was. "Nothing" only when true.>
