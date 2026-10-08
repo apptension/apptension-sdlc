@@ -1,7 +1,7 @@
 {
   "name": "apptension-sdlc",
   "displayName": "Apptension SDLC",
-  "version": "0.13.82",
+  "version": "0.24.15",
   "description": "Apptension SDLC processes as skills, each carrying its own portable agent contract for how we work.",
   "author": {
     "name": "Apptension"
@@ -11,7 +11,10 @@
     "apptension",
     "sdlc",
     "process",
-    "docs"
+    "dev-flow",
+    "issue",
+    "pull-request",
+    "workflow"
   ],
   "skills": "./skills/",
   "commands": "./commands/"

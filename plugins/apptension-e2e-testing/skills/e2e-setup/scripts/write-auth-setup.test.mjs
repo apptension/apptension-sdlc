@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AUTH_SETUP_MARKER, renderAuthSetup } from './scaffold.mjs';
+import { AUTH_SETUP_MARKER, renderAuthSetup, renderLogin } from './scaffold.mjs';
 import { writeAuthSetup, flagValue } from './write-auth-setup.mjs';
 
 const VALID_OPTS = {
@@ -29,19 +29,18 @@ test('stub output keeps commented login lines and says it is a stub', () => {
 });
 
 test('working output has no commented login lines and reads process.env', () => {
-  const out = renderAuthSetup({
-    emailSelector: "getByLabel('Email')",
-    passwordSelector: "getByLabel('Password')",
-    submitSelector: "getByRole('button', { name: /sign in/i })",
-    waitUrl: "'**/'",
-  });
+  const out = renderAuthSetup(VALID_OPTS);
   assert.doesNotMatch(out, /\/\/ await page\.getByLabel/); // no commented login
-  assert.match(out, /process\.env\.E2E_USER_EMAIL/);
-  assert.match(out, /process\.env\.E2E_USER_PASSWORD/);
-  assert.match(out, /process\.env\.E2E_LOGIN_URL/);
-  assert.match(out, /getByRole\('button', \{ name: \/sign in\/i \}\)/);
+  assert.match(out, /await login\(page\);/);             // steps live in fixtures/login.ts
+  assert.match(out, /await login\(page\);/);
   assert.match(out, /from '\.\/fixtures\/base'/);
   assert.ok(out.includes(AUTH_SETUP_MARKER));              // carries the generated marker
+  const login = renderLogin(VALID_OPTS);
+  assert.match(login, /requireEnv\('E2E_USER_EMAIL'\)/);
+  assert.match(login, /requireEnv\('E2E_USER_PASSWORD'\)/);
+  assert.match(login, /requireEnv\('E2E_LOGIN_URL'\)/);
+  assert.match(login, /getByRole\('button', \{ name: \/sign in\/i \}\)/);
+  assert.ok(login.includes(AUTH_SETUP_MARKER));
 });
 
 test('writeAuthSetup overwrites e2e/web/auth.setup.ts with the working file', () => {
@@ -50,7 +49,7 @@ test('writeAuthSetup overwrites e2e/web/auth.setup.ts with the working file', ()
   writeAuthSetup(dir, VALID_OPTS);
   const out = readFileSync(join(dir, 'e2e', 'web', 'auth.setup.ts'), 'utf8');
   assert.doesNotMatch(out, /\/\/ await page\.getByLabel/);
-  assert.match(out, /process\.env\.E2E_LOGIN_URL/);
+  assert.match(out, /await login\(page\);/);
 });
 
 test('writeAuthSetup throws when a required opt is missing', () => {
@@ -90,13 +89,13 @@ test('writeAuthSetup allows a retry: rewriting with different opts overwrites th
   mkdirSync(join(dir, 'e2e', 'web'), { recursive: true });
 
   const first = writeAuthSetup(dir, VALID_OPTS);
-  assert.equal(first.written, 'e2e/web/auth.setup.ts');
+  assert.deepEqual(first.written, ['e2e/web/auth.setup.ts', 'e2e/web/fixtures/login.ts']);
 
   const second = writeAuthSetup(dir, OTHER_OPTS);
 
-  assert.equal(second.written, 'e2e/web/auth.setup.ts');
+  assert.deepEqual(second.written, ['e2e/web/auth.setup.ts', 'e2e/web/fixtures/login.ts']);
   assert.equal(second.refused, undefined);
-  const out = readFileSync(join(dir, 'e2e', 'web', 'auth.setup.ts'), 'utf8');
+  const out = readFileSync(join(dir, 'e2e', 'web', 'fixtures', 'login.ts'), 'utf8');
   assert.match(out, /getByTestId\('email'\)/);
   assert.match(out, /'\*\*\/dashboard'/);
   assert.doesNotMatch(out, /getByLabel\('Email'\)/);
@@ -109,10 +108,10 @@ test('writeAuthSetup overwrites when the existing file is exactly the stub', () 
 
   const result = writeAuthSetup(dir, VALID_OPTS);
 
-  assert.equal(result.written, 'e2e/web/auth.setup.ts');
+  assert.deepEqual(result.written, ['e2e/web/auth.setup.ts', 'e2e/web/fixtures/login.ts']);
   const out = readFileSync(join(dir, 'e2e', 'web', 'auth.setup.ts'), 'utf8');
   assert.doesNotMatch(out, /\/\/ await page\.getByLabel/);
-  assert.match(out, /process\.env\.E2E_LOGIN_URL/);
+  assert.match(out, /await login\(page\);/);
 });
 
 // Finding A: a repo scaffolded by an OLDER plugin version has a stub with no
@@ -142,10 +141,10 @@ setup('authenticate', async ({ page }) => {
 
   const result = writeAuthSetup(dir, VALID_OPTS);
 
-  assert.equal(result.written, 'e2e/web/auth.setup.ts');
+  assert.deepEqual(result.written, ['e2e/web/auth.setup.ts', 'e2e/web/fixtures/login.ts']);
   const out = readFileSync(join(dir, 'e2e', 'web', 'auth.setup.ts'), 'utf8');
   assert.doesNotMatch(out, /\/\/ await page\.getByLabel/);
-  assert.match(out, /process\.env\.E2E_LOGIN_URL/);
+  assert.match(out, /await login\(page\);/);
 });
 
 // Finding D: `--email --password X` must not let email's value be the literal

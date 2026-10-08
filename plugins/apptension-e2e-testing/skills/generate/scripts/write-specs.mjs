@@ -2,8 +2,8 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync, lstat
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detect } from '../../e2e-setup/scripts/detect.mjs';
-import { WEB_DIR, MANIFEST_NAME, manifestSpecsDir, manifestPagesDir } from '../../e2e-setup/scripts/scaffold.mjs';
-import { readRootManifest } from '../../e2e-setup/scripts/manifest.mjs';
+import { WEB_DIR, SCAFFOLD_DIRS } from '../../e2e-setup/scripts/scaffold.mjs';
+import { assertSafeLocation } from '../../e2e-setup/scripts/manifest.mjs';
 import { JIRA_KEY_PATTERN } from './classify-argument.mjs';
 
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -34,7 +34,7 @@ function isValidSmokeFlag(smoke) {
 // usually new — its flowId directory, or the spec file itself, doesn't
 // exist yet. Resolves symlinks on whatever prefix of the path already
 // exists, then rejoins the not-yet-existing suffix lexically. Safe to do
-// lexically: every suffix segment this module ever appends (flowId, slug)
+// lexically: every suffix segment this module ever appends (flowId, slug, page)
 // is already validated as a single kebab-case component, so it carries no
 // '..' for a lexical join to mishandle.
 //
@@ -96,121 +96,105 @@ function isContainedIn(absolutePath, containerDir) {
 // where they looked.
 const SETUP_CANDIDATE_DIRS = [WEB_DIR, '.', 'e2e', 'tests', 'test', 'playwright'];
 
-// A usable scaffold manifest is a plain JSON object with a dirs object — not
-// null, not an array, not a bare primitive. Anything else can still parse as
-// valid JSON but has no scaffold shape: writing pom onto null throws, onto an
-// array is silently dropped by JSON.stringify, and onto a shapeless {} would
-// disagree with the resolvers, which need dirs. This is the same shape the
-// resolvers require, so a writer and the readers agree on which manifest counts.
-function isScaffoldManifest(manifest) {
-  return (
-    manifest !== null &&
-    typeof manifest === 'object' &&
-    !Array.isArray(manifest) &&
-    manifest.dirs !== null &&
-    typeof manifest.dirs === 'object' &&
-    !Array.isArray(manifest.dirs)
-  );
+// Page objects live under the suite's own pages dir. There is no config field
+// that names them, so this resolves from the agent-passed location, an
+// explicit override, or — when neither is given, the same absent-row case
+// resolveSpecDir falls back for — the default suite's pages dir, so a Page
+// Object run against the default suite is not refused for want of a location.
+export function resolvePagesDir(targetPath, options = {}) {
+  if (options.pagesDir) return assertSafeLocation(targetPath, options.pagesDir);
+  const location = options.location ? assertSafeLocation(targetPath, options.location) : WEB_DIR;
+  return join(location, SCAFFOLD_DIRS.pages);
 }
 
-// The path of the first candidate holding a scaffold-shaped manifest. Skips a
-// malformed or shapeless manifest and keeps searching, so a writer (persist-pom)
-// targets the same manifest the resolvers below read — never a broken or
-// shapeless higher-priority file.
-export function findParsedManifestPath(targetPath) {
-  if (readRootManifest(targetPath)) return join(targetPath, MANIFEST_NAME);
-  for (const candidate of SETUP_CANDIDATE_DIRS) {
-    const manifestPath = join(targetPath, candidate, MANIFEST_NAME);
-    if (!existsSync(manifestPath)) continue;
-    try {
-      if (isScaffoldManifest(JSON.parse(readFileSync(manifestPath, 'utf8')))) return manifestPath;
-    } catch {
-      // Malformed JSON — skip and try the next candidate.
-    }
-  }
-  return null;
-}
-
-// Walks the candidate dirs and returns the first repo-root-relative dir the
-// extractor yields a value from. Skips a manifest that is missing, malformed,
-// or that the extractor draws nothing from (e.g. no dirs.specs) and keeps
-// searching — so neither a broken nor an unrelated higher-priority manifest
-// hides a valid lower-priority one. dirs.specs/dirs.pages are relative to the
-// manifest's own directory, so the candidate is joined back on.
-function resolveFromManifest(targetPath, extract) {
-  for (const candidate of SETUP_CANDIDATE_DIRS) {
-    const manifestPath = join(targetPath, candidate, MANIFEST_NAME);
-    if (!existsSync(manifestPath)) continue;
-    let manifest;
-    try {
-      manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-    } catch {
-      continue;
-    }
-    const value = extract(manifest);
-    if (value) return join(candidate, value);
-  }
-  return null;
-}
-
-function specsDirFromScaffoldManifest(targetPath) {
-  return resolveFromManifest(targetPath, manifestSpecsDir);
-}
-
-// Page objects only exist in a scaffolded repo, so the pages dir comes only
-// from the manifest — no playwright.config fallback. Returns a repo-root-
-// relative dir, or null when no manifest declares a pages dir.
-export function resolvePagesDir(targetPath) {
-  const root = readRootManifest(targetPath);
-  if (root) {
-    const pages = manifestPagesDir(root);
-    if (pages) return join(root.location, pages);
-  }
-  return resolveFromManifest(targetPath, manifestPagesDir);
-}
-
-// The house-style split: one file per responsibility, named <flowId>.<role>.
+// The house-style split: one file per responsibility, named <page>.<role>.
 // A fixed allowlist, never caller-supplied free text, so the role can never
 // carry a path component.
 const PAGE_OBJECT_ROLES = new Set(['selectors', 'page', 'assertion']);
 
-// Writes house-style page objects into the manifest's pages dir under the same
-// containment and refuse-exists rules as specs. Content lands verbatim: unlike
-// a spec, a page object carries no provenance comment.
-function writePageObjects(targetPath, pageObjects, ext) {
+// The class every <page>.page.ts extends: the page handle, the route slug and
+// goto. It carries no timeout or wait of its own, so the suite's config stays
+// the one place those are set.
+const BASE_PAGE_TEMPLATES = {
+  ts: `import type { Page } from '@playwright/test';
+
+export class BasePage {
+  constructor(
+    readonly page: Page,
+    readonly slug: string,
+  ) {}
+
+  async goto() {
+    await this.page.goto(this.slug);
+  }
+}
+`,
+  js: `export class BasePage {
+  constructor(page, slug) {
+    this.page = page;
+    this.slug = slug;
+  }
+
+  async goto() {
+    await this.page.goto(this.slug);
+  }
+}
+`,
+};
+
+// Writes pages/base.page.<ext> once, the first time a Page Object run needs
+// it. An existing file is the suite's own and is never replaced.
+function writeBasePage(targetPath, pageObjects, ext, options = {}) {
+  if (!Array.isArray(pageObjects) || pageObjects.length === 0) return undefined;
+  const pagesDir = resolvePagesDir(targetPath, options);
+  const path = join(pagesDir, `base.page.${ext}`);
+  const absolutePath = join(targetPath, path);
+  if (!isContainedIn(absolutePath, join(targetPath, pagesDir))) return { path: null, result: 'refused-invalid-path' };
+  if (existsSync(absolutePath)) return { path, result: 'exists' };
+  mkdirSync(dirname(absolutePath), { recursive: true });
+  writeFileSync(absolutePath, BASE_PAGE_TEMPLATES[ext]);
+  return { path, result: 'created' };
+}
+
+// Writes house-style page objects into a folder per page under the manifest's
+// pages dir, <page>/<page>.<role>, under the same containment rule as specs.
+// An existing file is the suite's own and is reported as `exists`, never
+// replaced: a flow that needs a page object already there uses it, and the
+// skill extends it in place. Content lands verbatim: unlike a spec, a page
+// object carries no provenance comment.
+function writePageObjects(targetPath, pageObjects, ext, options = {}) {
   if (!Array.isArray(pageObjects) || pageObjects.length === 0) return [];
-  const pagesDir = resolvePagesDir(targetPath);
-  const pagesDirAbsolute = pagesDir ? join(targetPath, pagesDir) : null;
+  const pagesDir = resolvePagesDir(targetPath, options);
+  const pagesDirAbsolute = join(targetPath, pagesDir);
   const results = [];
-  for (const { flowId, role, content } of pageObjects) {
-    if (!pagesDir) {
-      results.push({ flowId, role, path: null, result: 'refused-no-pages-dir' });
-      continue;
-    }
-    if (!isValidSlug(flowId)) {
-      results.push({ flowId, role, path: null, result: 'refused-invalid-flow' });
+  for (const { page, role, content } of pageObjects) {
+    if (!isValidSlug(page)) {
+      results.push({ page, role, path: null, result: 'refused-invalid-page' });
       continue;
     }
     if (!PAGE_OBJECT_ROLES.has(role)) {
-      results.push({ flowId, role, path: null, result: 'refused-invalid-role' });
+      results.push({ page, role, path: null, result: 'refused-invalid-role' });
       continue;
     }
-    const relPath = join(pagesDir, `${flowId}.${role}.${ext}`);
+    const relPath = join(pagesDir, page, `${page}.${role}.${ext}`);
     const absolutePath = join(targetPath, relPath);
     if (!isContainedIn(absolutePath, pagesDirAbsolute)) {
-      results.push({ flowId, role, path: null, result: 'refused-invalid-flow' });
+      results.push({ page, role, path: null, result: 'refused-invalid-page' });
       continue;
     }
     if (existsSync(absolutePath)) {
-      results.push({ flowId, role, path: relPath, result: 'refused-exists' });
+      results.push({ page, role, path: relPath, result: 'exists' });
       continue;
     }
     mkdirSync(dirname(absolutePath), { recursive: true });
     writeFileSync(absolutePath, content);
-    results.push({ flowId, role, path: relPath, result: 'created' });
+    results.push({ page, role, path: relPath, result: 'created' });
   }
   return results;
 }
+
+const TEST_DIR_KEY = /\btestDir\s*:/;
+const TEST_DIR_LITERAL = /testDir:\s*['"]\.?\/?([^'"]*)['"]/;
 
 const PLAYWRIGHT_CONFIG_NAMES = [
   'playwright.config.ts',
@@ -225,38 +209,61 @@ const PLAYWRIGHT_CONFIG_NAMES = [
 // smoke-split check, below — doesn't have to re-walk this search order and
 // risk disagreeing with it about where configs live.
 //
-// Skips past a config that exists but whose testDir this regex can't read,
-// rather than stopping there: a repo can have an unrelated or partial
-// config earlier in the search order (e2e/web is checked first) and a real,
-// working one later. Stopping at the first existing file regardless of
-// whether it resolves would make that later, valid config unreachable —
-// exactly the config resolveSpecDir itself would have found by continuing.
-export function findPlaywrightConfig(targetPath) {
-  // The persisted root manifest's location first: a suite scaffolded at a
-  // custom location (e.g. 'services/e2e') is not among the fixed candidates
-  // below, so without this it is invisible to this search — the config is
-  // right there on disk but never checked.
-  const rootLocation = readRootManifest(targetPath)?.location;
-  const candidates = rootLocation ? [rootLocation, ...SETUP_CANDIDATE_DIRS] : SETUP_CANDIDATE_DIRS;
-  for (const candidate of candidates) {
+// A config that names no testDir is a suite root, because Playwright then
+// tests the config's own directory. It counts only where the runner loads it:
+// at the passed location, or at a location detect() reports with
+// @playwright/test declared, the same set run-specs picks its cwd from.
+// Anywhere else it is a stray config, and picking it would write specs
+// outside the active suite.
+//
+// Skips past a config whose testDir is present but not a string literal this
+// regex can read (say `join(__dirname, 'tests')`), rather than stopping there:
+// a repo can have an unrelated or partial config earlier in the search order
+// (e2e/web is checked first) and a real, working one later. Stopping at the
+// first existing file regardless of whether it resolves would make that
+// later, valid config unreachable — exactly the config resolveSpecDir itself
+// would have found by continuing.
+export function findPlaywrightConfig(targetPath, location) {
+  // The agent-passed location first: a suite scaffolded at a custom location
+  // (e.g. 'services/e2e') is not among the fixed candidates below, so without
+  // this it is invisible to this search — the config is right there on disk
+  // but never checked.
+  const candidates = location
+    ? [assertSafeLocation(targetPath, location), ...SETUP_CANDIDATE_DIRS]
+    : SETUP_CANDIDATE_DIRS;
+  let runnerLocations;
+  const isRunnerLocation = (candidate) => {
+    runnerLocations ??= new Set(
+      detect(targetPath, { location })
+        .locations.filter((entry) => entry.playwright?.installed)
+        .map((entry) => entry.path),
+    );
+    return runnerLocations.has(candidate);
+  };
+  for (const [index, candidate] of candidates.entries()) {
+    const isBound = Boolean(location) && index === 0;
     for (const name of PLAYWRIGHT_CONFIG_NAMES) {
       const path = join(targetPath, candidate, name);
       if (!existsSync(path)) continue;
-      if (readFileSync(path, 'utf8').match(/testDir:\s*['"]\.?\/?([^'"]*)['"]/)) return path;
+      const content = readFileSync(path, 'utf8');
+      if (content.match(TEST_DIR_LITERAL)) return path;
+      if (!TEST_DIR_KEY.test(content) && (isBound || isRunnerLocation(candidate))) return path;
     }
   }
   return null;
 }
 
 // testDir is relative to the config that declares it, which is what makes the
-// scaffolded `testDir: '.'` mean e2e/web rather than the repo root.
-function specsDirFromPlaywrightConfig(targetPath) {
-  const configPath = findPlaywrightConfig(targetPath);
+// scaffolded `testDir: '.'` mean e2e/web rather than the repo root. A config
+// naming no testDir gets the scaffolder's <config dir>/specs, which Playwright
+// lists because it tests the config's directory.
+function specsDirFromPlaywrightConfig(targetPath, location) {
+  const configPath = findPlaywrightConfig(targetPath, location);
   if (!configPath) return null;
 
-  const match = readFileSync(configPath, 'utf8').match(/testDir:\s*['"]\.?\/?([^'"]*)['"]/);
+  const match = readFileSync(configPath, 'utf8').match(TEST_DIR_LITERAL);
   const candidate = dirname(relative(targetPath, configPath));
-  return join(candidate, match[1]);
+  return join(candidate, match ? match[1] : SCAFFOLD_DIRS.specs);
 }
 
 const WEB_DIR_SEGMENTS = WEB_DIR.split('/');
@@ -272,20 +279,38 @@ export function isWebDirTarget(targetPath) {
   return WEB_DIR_SEGMENTS.every((segment, index) => segments[offset + index] === segment);
 }
 
-export function resolveSpecDir(targetPath, options = {}) {
-  if (options.specDir) return options.specDir;
+// The specs dir a bound location's own config configures, read from that one
+// location and no other so an unrelated config elsewhere in the repo can never
+// answer for this suite. Returns join(location, testDir) when the config names
+// a testDir, else null (no config at the location, or a config naming none).
+// A testDir of '.' resolves to the location itself; the caller reads that as
+// "no relocation" and keeps the scaffolder's <location>/specs convention.
+function specsDirForBoundLocation(targetPath, location) {
+  const dir = assertSafeLocation(targetPath, location);
+  for (const name of PLAYWRIGHT_CONFIG_NAMES) {
+    const configPath = join(targetPath, dir, name);
+    if (!existsSync(configPath)) continue;
+    const match = readFileSync(configPath, 'utf8').match(TEST_DIR_LITERAL);
+    return match ? join(dir, match[1]) : null;
+  }
+  return null;
+}
 
-  // The repo-root manifest records the suite location; dirs are relative to it.
-  const root = readRootManifest(targetPath);
-  if (root) {
-    const specs = manifestSpecsDir(root);
-    if (specs) return join(root.location, specs);
+export function resolveSpecDir(targetPath, options = {}) {
+  if (options.specDir) return assertSafeLocation(targetPath, options.specDir);
+  // A bound suite location writes specs where its own config's testDir names,
+  // so a conform suite that hand-set `testDir: './tests'` gets specs Playwright
+  // will discover. A testDir of '.' is the scaffolder's own default rather than
+  // a relocation, so it — like a config that names no testDir, or no config at
+  // all — falls back to the plugin's `<location>/specs` convention.
+  if (options.location) {
+    const dir = assertSafeLocation(targetPath, options.location);
+    const fromConfig = specsDirForBoundLocation(targetPath, options.location);
+    if (fromConfig && fromConfig !== dir) return fromConfig;
+    return join(dir, SCAFFOLD_DIRS.specs);
   }
 
-  const fromScaffold = specsDirFromScaffoldManifest(targetPath);
-  if (fromScaffold) return fromScaffold;
-
-  const fromConfig = specsDirFromPlaywrightConfig(targetPath);
+  const fromConfig = specsDirFromPlaywrightConfig(targetPath, options.location);
   if (fromConfig) return fromConfig;
 
   return 'e2e/specs';
@@ -318,8 +343,8 @@ function injectProvenanceComment(content, payload) {
 // for a suite that was never onboarded via e2e-setup — an explicit
 // --spec-dir, or one of resolveSpecDir's own fallbacks, can point somewhere
 // resolveLocation's own guess never would (#436 review).
-function fileExtension(targetPath, specDir) {
-  return detect(targetPath, { specDir }).language === 'ts' ? 'ts' : 'js';
+function fileExtension(targetPath, specDir, location) {
+  return detect(targetPath, { specDir, location }).language === 'ts' ? 'ts' : 'js';
 }
 
 // A self-identifying tracker string: a positive integer (or its numeric
@@ -355,7 +380,7 @@ function provenanceError({ ticket, origin }) {
 }
 
 export function writeSpecs(targetPath, payload, options = {}) {
-  const { specDir: specDirOption } = options;
+  const { specDir: specDirOption, location, pagesDir } = options;
   const { ticket, origin, cases } = payload;
 
   const provenanceProblem = provenanceError(payload);
@@ -370,13 +395,14 @@ export function writeSpecs(targetPath, payload, options = {}) {
     );
   }
 
-  const specDir = resolveSpecDir(targetPath, { specDir: specDirOption });
+  const specDir = resolveSpecDir(targetPath, { specDir: specDirOption, location });
   const specDirAbsolute = join(targetPath, specDir);
-  const ext = fileExtension(targetPath, specDir);
+  const ext = fileExtension(targetPath, specDir, location);
 
-  // Page objects first, so a spec that imports one is written after the file
-  // it depends on already exists.
-  const pageObjectResults = writePageObjects(targetPath, payload.pageObjects, ext);
+  // The base class, then page objects, so each file is written after the one
+  // it imports already exists.
+  const basePage = writeBasePage(targetPath, payload.pageObjects, ext, { location, pagesDir });
+  const pageObjectResults = writePageObjects(targetPath, payload.pageObjects, ext, { location, pagesDir });
 
   const results = [];
 
@@ -429,15 +455,29 @@ export function writeSpecs(targetPath, payload, options = {}) {
     results.push({ flowId, slug, specPath, result: 'created' });
   }
 
-  return { ...(origin ? { origin } : { ticket }), specDir, results, pageObjectResults };
+  return {
+    ...(origin ? { origin } : { ticket }),
+    specDir,
+    results,
+    pageObjectResults,
+    ...(basePage ? { basePage } : {}),
+  };
 }
 
 const isMainModule = process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMainModule) {
   const targetPath = process.argv[2] ?? '.';
   const args = process.argv.slice(3);
-  const specDirIndex = args.indexOf('--spec-dir');
-  const specDir = specDirIndex !== -1 ? args[specDirIndex + 1] : undefined;
+  const flag = (name) => {
+    const i = args.indexOf(name);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+  const specDir = flag('--spec-dir');
+  // The suite location's route into this script. Absent them, specs fall back
+  // to the config testDir then e2e/specs, and page objects to the default
+  // suite's pages dir — pass them to target a relocated suite.
+  const location = flag('--location');
+  const pagesDir = flag('--pages-dir');
 
   const handleError = (err) => {
     console.log(JSON.stringify({ status: 'error', message: err.message }, null, 2));
@@ -449,7 +489,7 @@ if (isMainModule) {
   process.stdin.on('end', () => {
     try {
       const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      console.log(JSON.stringify(writeSpecs(targetPath, payload, { specDir }), null, 2));
+      console.log(JSON.stringify(writeSpecs(targetPath, payload, { specDir, location, pagesDir }), null, 2));
     } catch (err) {
       handleError(err);
     }

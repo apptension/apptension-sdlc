@@ -8,7 +8,7 @@ Apptension's public plugin marketplace — SDLC processes, code and infrastructu
 
 ## Plugins
 
-- **apptension-e2e-testing** — Apptension E2E testing — generates Playwright end-to-end test specs from a ticket's description, unit tests, and a testing-guide doc, then verifies they run.
+- **apptension-e2e-testing** — Apptension E2E testing — generates Playwright end-to-end test specs from a ticket's description, its diff, and its unit tests — plus a testing-guide section when the ticket carries one — then verifies they run.
 - **apptension-frontend-craft** — Award-informed product experience skills for AI coding agents: complete UI states, interaction craft, supporting imagery, forms, polish passes, and anti-slop visual design. Complements Superpowers and Apptension SDLC so frontend work ships calm, original, and complete — not template-blank.
 - **apptension-review** — Apptension review skills — methodical assessments of code, infrastructure, and security, plus a full project audit with scored, comparable reports. Findings and reports only; no code changes.
 - **apptension-sdlc** — Apptension SDLC processes as skills plus bundled docs: paired human guidance and portable agent contracts for how we work.
@@ -62,3 +62,14 @@ pi install git:github.com/apptension/apptension-sdlc
 ```
 
 Then choose plugins in `.pi/apptension.json`, same shape as above.
+
+### Kiro
+
+Add Custom Power → Import power from GitHub with `https://github.com/apptension/apptension-sdlc` installs **apptension-sdlc**.
+
+For the other plugins, clone the repo, then Add Custom Power → Import power from a folder and pick the plugin's directory:
+
+- `plugins/apptension-frontend-craft`
+- `plugins/apptension-review`
+
+Kiro loads skills, not slash commands, so invoke a skill such as `dev-flow` by name.

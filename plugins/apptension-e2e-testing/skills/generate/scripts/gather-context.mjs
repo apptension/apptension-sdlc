@@ -51,7 +51,7 @@ function detectBaseBranch(targetPath, exec) {
   return ref.replace(/^refs\/remotes\/origin\//, '');
 }
 
-function detectBaseBranchSafely(targetPath, exec) {
+export function detectBaseBranchSafely(targetPath, exec) {
   try {
     return detectBaseBranch(targetPath, exec);
   } catch {
@@ -60,12 +60,28 @@ function detectBaseBranchSafely(targetPath, exec) {
 }
 
 function localDiffFiles(targetPath, base, exec) {
+  let tracked = [];
+  let trackedOk = true;
   try {
-    const output = exec('git', ['diff', '--name-only', `origin/${base}...HEAD`], { cwd: targetPath });
-    return splitLines(output);
+    const mergeBase = exec('git', ['merge-base', `origin/${base}`, 'HEAD'], { cwd: targetPath }).trim();
+    tracked = splitLines(exec('git', ['diff', '--name-only', mergeBase], { cwd: targetPath }));
   } catch {
-    return [];
+    // An unreachable merge-base (e.g. `origin/<base>` not fetched) keeps
+    // the untracked scan below, but is reported so the caller does not
+    // mistake an untracked-only list for a complete local diff.
+    trackedOk = false;
   }
+
+  let untracked = [];
+  try {
+    untracked = splitLines(exec('git', ['ls-files', '--others', '--exclude-standard'], { cwd: targetPath }));
+  } catch {
+    // Best-effort: a file `git rm --cached` left on disk shows as both a
+    // deletion in `tracked` and untracked here, so dedupe. A failure to
+    // list untracked files should not discard an already-successful
+    // tracked diff.
+  }
+  return { files: [...new Set([...tracked, ...untracked])], tracked, trackedOk };
 }
 
 function linkedPrNumber(issueNumber, targetPath, exec) {
@@ -91,9 +107,76 @@ function prDiffFiles(prNumber, targetPath, exec) {
   }
 }
 
+function commitInCheckout(sha, targetPath, exec) {
+  if (!sha) return false;
+  try {
+    exec('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], { cwd: targetPath });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The run boots and tests this checkout, so it must hold the PR's code: an
+// open PR's head, or a merged PR's merge commit. A checkout that predates
+// either would test code without the change. A failed view reports state
+// null: the caller cannot confirm what it would test.
+function prCheckout(prNumber, targetPath, exec) {
+  let view;
+  try {
+    view = JSON.parse(
+      exec('gh', ['pr', 'view', String(prNumber), '--json', 'state,headRefOid,mergeCommit'], { cwd: targetPath }),
+    );
+  } catch {
+    return { number: prNumber, state: null };
+  }
+  const state = view.state ?? null;
+  const code = { OPEN: view.headRefOid, MERGED: view.mergeCommit?.oid };
+  if (!(state in code)) return { number: prNumber, state };
+  return { number: prNumber, state, inCheckout: commitInCheckout(code[state], targetPath, exec) };
+}
+
 function fetchTicket(issueNumber, targetPath, exec) {
-  const output = exec('gh', ['issue', 'view', String(issueNumber), '--json', 'title,body'], { cwd: targetPath });
+  const output = exec('gh', ['issue', 'view', String(issueNumber), '--json', 'title,body,labels'], { cwd: targetPath });
   return JSON.parse(output);
+}
+
+// `bug`, `type: bug`, `kind/bug`, `type-bug`: the word bug as the label's last
+// token. `debug-tools` and `bugfix-backlog` name something else, and
+// `not-a-bug`, `non-bug` and `no-bug` say the opposite.
+const BUG_LABEL = /(^|[\s:/_-])bug$/i;
+const NEGATED_BUG_LABEL = /(^|[\s:/_-])(not|non|no)([\s:/_-]+a)?[\s:/_-]+bug$/i;
+
+export function bugSignalFromLabels(labels) {
+  return (labels ?? []).some((label) => {
+    const name = label.name.trim();
+    return BUG_LABEL.test(name) && !NEGATED_BUG_LABEL.test(name);
+  });
+}
+
+const ISSUE_TYPE_QUERY =
+  'query($owner:String!,$repo:String!,$n:Int!){repository(owner:$owner,name:$repo){issue(number:$n){issueType{name}}}}';
+
+// Best-effort: a repo without issue types, an old `gh`, or a failed call all
+// mean no type signal, never a failed gather.
+function issueTypeIsBug(issueNumber, targetPath, exec) {
+  try {
+    const output = exec(
+      'gh',
+      ['api', 'graphql', '-f', `query=${ISSUE_TYPE_QUERY}`, '-F', 'owner={owner}', '-F', 'repo={repo}', '-F', `n=${issueNumber}`],
+      { cwd: targetPath },
+    );
+    const name = JSON.parse(output)?.data?.repository?.issue?.issueType?.name;
+    return typeof name === 'string' && name.toLowerCase() === 'bug';
+  } catch {
+    return false;
+  }
+}
+
+function bugSignal(ticket, issueNumber, targetPath, exec) {
+  if (bugSignalFromLabels(ticket.labels)) return 'label';
+  if (issueTypeIsBug(issueNumber, targetPath, exec)) return 'type';
+  return null;
 }
 
 function currentBranch(targetPath, exec) {
@@ -124,22 +207,31 @@ export function gatherContext(targetPath, issueNumber, options = {}) {
 
   let changedFiles = [];
   let diffSource = 'none';
+  let pr;
 
   const resolvedBase = base ?? detectBaseBranchSafely(targetPath, exec);
   if (resolvedBase) {
-    changedFiles = localDiffFiles(targetPath, resolvedBase, exec);
-    if (changedFiles.length > 0) diffSource = 'git';
+    const local = localDiffFiles(targetPath, resolvedBase, exec);
+    changedFiles = local.files;
+    // Only committed work decides that this checkout holds the issue's
+    // diff. An untracked-only list must not suppress the PR fallback:
+    // one stray new file on a branch with no commits against base would
+    // otherwise be reported as the whole change, hiding the linked PR.
+    if (local.trackedOk && local.tracked.length > 0) diffSource = 'git';
   }
 
-  if (changedFiles.length === 0) {
+  if (diffSource !== 'git') {
     const prNumber = linkedPrNumber(issueNumber, targetPath, exec);
     if (prNumber) {
       const prFiles = prDiffFiles(prNumber, targetPath, exec);
       if (prFiles.length > 0) {
-        changedFiles = prFiles;
+        // Untracked files are local-only, so the PR cannot list them.
+        changedFiles = [...new Set([...prFiles, ...changedFiles])];
         diffSource = 'gh-pr';
+        pr = prCheckout(prNumber, targetPath, exec);
       }
     }
+    if (diffSource === 'none' && changedFiles.length > 0) diffSource = 'git';
   }
 
   let hasChildren;
@@ -158,16 +250,24 @@ export function gatherContext(targetPath, issueNumber, options = {}) {
     base: resolvedBase || null,
     changedFiles,
     testFiles,
+    ...(pr ? { pr } : {}),
     ...(diffSource === 'none' ? { hasChildren } : {}),
+    bug: bugSignal(ticket, issueNumber, targetPath, exec),
   };
+}
+
+export function parseCliArgs(argv) {
+  const baseIndex = argv.indexOf('--base');
+  const base = baseIndex !== -1 ? argv[baseIndex + 1] : undefined;
+  const positional = baseIndex !== -1 ? [...argv.slice(0, baseIndex), ...argv.slice(baseIndex + 2)] : argv;
+  return { issueNumber: Number(positional[0]), targetPath: positional[1] ?? '.', base };
 }
 
 const isMainModule = process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMainModule) {
   try {
-    const issueNumber = Number(process.argv[2]);
-    const targetPath = process.argv[3] ?? '.';
-    console.log(JSON.stringify(gatherContext(targetPath, issueNumber), null, 2));
+    const { issueNumber, targetPath, base } = parseCliArgs(process.argv.slice(2));
+    console.log(JSON.stringify(gatherContext(targetPath, issueNumber, { base }), null, 2));
   } catch (err) {
     console.log(JSON.stringify({ status: 'error', message: err.message }, null, 2));
     process.exitCode = 0;

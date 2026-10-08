@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { detect } from '../../e2e-setup/scripts/detect.mjs';
 import { loadEnvFile, resolveWebServer } from '../../e2e-setup/scripts/web-server.mjs';
 import { resolveLocation, rootRelativeCwd } from '../../e2e-setup/scripts/manifest.mjs';
+import { ignoreInRepo } from '../../e2e-setup/scripts/probe-port.mjs';
 
 const STATE_DIR = '.e2e-testing';
 
@@ -102,12 +103,13 @@ function depsRequired(appDir) {
 }
 
 export async function resolveAppUrl(targetPath, options = {}) {
-  const { location, probe = defaultProbe, env = process.env } = options;
+  const { location, suiteLocation, probe = defaultProbe, env = process.env } = options;
   const root = resolve(targetPath);
-  // The suite location, never the app --location: the suite's own .env lives
-  // there regardless of which app directory --location tells the webServer
-  // to boot.
-  const webDir = resolveLocation(root, {});
+  // `location` is the app dir resolveCommand boots (an override for which
+  // monorepo package to start); `suiteLocation` is where the suite (and its
+  // .env) lives. Two different questions — the suite's own .env loads from
+  // `suiteLocation` regardless of which app directory `location` boots.
+  const webDir = resolveLocation(root, { location: suiteLocation });
 
   const url = readBaseUrl(root, env, webDir);
   if (!url) return { status: 'no-base-url' };
@@ -121,6 +123,7 @@ export async function resolveAppUrl(targetPath, options = {}) {
 export async function startApp(targetPath, options = {}) {
   const {
     location,
+    suiteLocation,
     probe = defaultProbe,
     env = process.env,
     spawn = nodeSpawn,
@@ -130,7 +133,9 @@ export async function startApp(targetPath, options = {}) {
     now = () => Date.now(),
   } = options;
   const root = resolve(targetPath);
-  const webDir = resolveLocation(root, {});
+  // Same app-vs-suite distinction as resolveAppUrl: `location` is the app
+  // resolveCommand boots, `suiteLocation` is where the suite lives.
+  const webDir = resolveLocation(root, { location: suiteLocation });
 
   const url = readBaseUrl(root, env, webDir);
   if (!url) return { status: 'no-base-url' };
@@ -153,6 +158,8 @@ export async function startApp(targetPath, options = {}) {
   }
 
   mkdirSync(join(root, STATE_DIR), { recursive: true });
+  ignoreInRepo(root, `${STATE_DIR}/app.log`);
+  ignoreInRepo(root, `${STATE_DIR}/app.pid`);
   const logPath = logFilePath(root);
   // 'w', not 'a': a fresh log per boot, so a timeout's tail is this boot's
   // output and never a previous run's.
@@ -276,7 +283,11 @@ if (isMainModule) {
     print({ status: 'error', message: `--timeout must be a positive number of milliseconds, got "${timeout ?? ''}"` });
     process.exitCode = 1;
   } else {
-    const shared = { location: flag('--location'), timeoutMs };
+    // Two distinct flags: --location names the app dir resolveCommand boots
+    // (a human's override for which monorepo package to start); --suite-location
+    // names the suite dir (e.g. e2e/web) — the only route to it now that it
+    // no longer comes from a manifest.
+    const shared = { location: flag('--location'), suiteLocation: flag('--suite-location'), timeoutMs };
 
     // deps-missing is the one start outcome the human must act on before a rerun
     // can work, so it exits non-zero — unlike the other reported stops.
@@ -287,6 +298,6 @@ if (isMainModule) {
 
     if (args.includes('--stop')) stopApp(targetPath).then(print).catch(handleError);
     else if (args.includes('--start')) startApp(targetPath, shared).then(printStart).catch(handleError);
-    else resolveAppUrl(targetPath, { location: shared.location }).then(print).catch(handleError);
+    else resolveAppUrl(targetPath, shared).then(print).catch(handleError);
   }
 }

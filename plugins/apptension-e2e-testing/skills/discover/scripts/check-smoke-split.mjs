@@ -10,8 +10,13 @@ import { hasSmokeSplit } from '../../e2e-setup/scripts/scaffold.mjs';
 // in whatever ordinary project matches, giving no merge-blocking guarantee
 // at all. This is checked before writing, not after, so a missing split is
 // an actionable stop instead of a spec that silently doesn't do its job.
-export function checkSmokeSplit(targetPath) {
-  const configPath = findPlaywrightConfig(targetPath);
+// `location` is the e2e suite directory relative to the repo root, from
+// the `### E2E bindings` Location row. A suite at a non-default location
+// (e.g. 'services/e2e') is invisible to findPlaywrightConfig's fixed
+// candidate walk without it, so the caller reads Location and passes it
+// through; a suite at the default e2e/web needs no location.
+export function checkSmokeSplit(targetPath, location) {
+  const configPath = findPlaywrightConfig(targetPath, location);
   if (!configPath) {
     return { hasSplit: false, configPath: null };
   }
@@ -22,8 +27,15 @@ export function checkSmokeSplit(targetPath) {
 const isMainModule = process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMainModule) {
   try {
-    const targetPath = process.argv[2] ?? '.';
-    console.log(JSON.stringify(checkSmokeSplit(targetPath), null, 2));
+    const args = process.argv.slice(2);
+    const locationFlag = args.indexOf('--location');
+    const location = locationFlag === -1 ? undefined : args[locationFlag + 1];
+    const positional = args.filter((arg, index) => {
+      if (locationFlag !== -1 && (index === locationFlag || index === locationFlag + 1)) return false;
+      return !arg.startsWith('--');
+    });
+    const targetPath = positional[0] ?? '.';
+    console.log(JSON.stringify(checkSmokeSplit(targetPath, location), null, 2));
   } catch (err) {
     // A removed or unreadable config makes the read throw. Match the other
     // entrypoints: an error envelope on stdout, exit 0 — never a raw stack.

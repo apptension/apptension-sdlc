@@ -12,7 +12,7 @@
     {
       "name": "apptension-e2e-testing",
       "source": "./plugins/apptension-e2e-testing",
-      "description": "Apptension E2E testing — generates Playwright end-to-end test specs from a ticket's description, unit tests, and a testing-guide doc, then verifies they run.\n",
+      "description": "Apptension E2E testing — generates Playwright end-to-end test specs from a ticket's description, its diff, and its unit tests — plus a testing-guide section when the ticket carries one — then verifies they run.\n",
       "category": "testing",
       "tags": [
         "e2e",

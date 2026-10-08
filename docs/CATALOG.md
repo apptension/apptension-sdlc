@@ -9,6 +9,6 @@
 
 ## All plugins
 
-- **apptension-e2e-testing** — Apptension E2E testing — generates Playwright end-to-end test specs from a ticket's description, unit tests, and a testing-guide doc, then verifies they run. `local:./plugins/apptension-e2e-testing` _(categories: testing; tags: e2e, playwright, testing)_
+- **apptension-e2e-testing** — Apptension E2E testing — generates Playwright end-to-end test specs from a ticket's description, its diff, and its unit tests — plus a testing-guide section when the ticket carries one — then verifies they run. `local:./plugins/apptension-e2e-testing` _(categories: testing; tags: e2e, playwright, testing)_
 - **apptension-review** — Apptension review skills — methodical assessments of code, infrastructure, and security, plus a full project audit with scored, comparable reports. Findings and reports only; no code changes. `local:./plugins/apptension-review`
 - **apptension-sdlc** — Apptension SDLC processes as skills plus bundled docs: paired human guidance and portable agent contracts for how we work. `local:./plugins/apptension-sdlc` _(categories: workflow, methodology; tags: sdlc, process, docs)_

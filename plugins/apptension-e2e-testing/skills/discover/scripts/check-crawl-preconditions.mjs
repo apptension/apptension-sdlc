@@ -172,11 +172,13 @@ function checkBlocklist(root, webDir) {
 // staging against production data. machineReady means the three checks pass
 // and the human gate is still open. It never means go.
 export async function checkCrawlPreconditions(targetPath, options = {}) {
-  const { env = process.env, probe = defaultProbe } = options;
+  const { env = process.env, probe = defaultProbe, location } = options;
   const root = resolve(targetPath);
   // The suite location — where the suite's .env and .auth live — never an app
-  // --location: this function has no app-selection concern of its own.
-  const webDir = resolveLocation(root, {});
+  // --location: this function has no app-selection concern of its own. A repo
+  // whose suite lives elsewhere passes it in; absent, resolveLocation falls
+  // back to the e2e/web default.
+  const webDir = resolveLocation(root, { location });
 
   const baseUrl = await checkBaseUrl(root, env, probe, webDir);
   const authState = checkAuthState(root, webDir);
@@ -196,8 +198,15 @@ export async function checkCrawlPreconditions(targetPath, options = {}) {
 const isMainModule =
   process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMainModule) {
-  const targetPath = process.argv[2] ?? '.';
-  checkCrawlPreconditions(targetPath).then((result) => {
+  const args = process.argv.slice(2);
+  const locationFlag = args.indexOf('--location');
+  const location = locationFlag === -1 ? undefined : args[locationFlag + 1];
+  const positional = args.filter((arg, index) => {
+    if (locationFlag !== -1 && (index === locationFlag || index === locationFlag + 1)) return false;
+    return !arg.startsWith('--');
+  });
+  const targetPath = positional[0] ?? '.';
+  checkCrawlPreconditions(targetPath, { location }).then((result) => {
     console.log(JSON.stringify(result, null, 2));
   });
 }

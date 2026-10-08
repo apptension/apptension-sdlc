@@ -1,0 +1,250 @@
+name: Verification Skill Maintenance
+
+on:
+  schedule:
+    - cron: %%SCHEDULE%%
+  workflow_dispatch:
+
+concurrency:
+  group: verification-maintenance-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: read
+      actions: read
+    outputs:
+      base_sha: ${{ steps.prepare.outputs.base_sha }}
+      ready: ${{ steps.prepare.outputs.ready }}
+      recovery: ${{ steps.prepare.outputs.recovery }}
+    steps:
+      - name: Checkout trusted integration revision
+        uses: actions/checkout@v4
+        with:
+          ref: %%INTEGRATION_BRANCH%%
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify maintenance branch without writes
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/verification-maintenance/cli.py prepare \
+            --root . \
+            --config .github/verification-maintenance/config.json \
+            --output .verification-output/context.json
+
+  recover:
+    needs: preflight
+    if: needs.preflight.outputs.recovery == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: read
+      actions: read
+    steps:
+      - name: Checkout current trusted integration revision
+        uses: actions/checkout@v4
+        with:
+          ref: %%INTEGRATION_BRANCH%%
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Independently validate and recover retained publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/verification-maintenance/cli.py recover \
+            --root . \
+            --config .github/verification-maintenance/config.json
+
+  analyze:
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      base_sha: ${{ steps.prepare.outputs.base_sha }}
+      ready: ${{ steps.prepare.outputs.ready }}
+      bundle_artifact_id: ${{ steps.bundle-upload.outputs.artifact-id }}
+      evidence_artifact_id: ${{ steps.evidence-upload.outputs.artifact-id }}
+
+    steps:
+      - name: Checkout project
+        id: project
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout trusted maintenance tools
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.project.outputs.commit }}
+          path: .verification-output/trusted
+          persist-credentials: false
+
+      - name: Prepare trusted context
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .verification-output/trusted/.github/verification-maintenance/cli.py prepare \
+            --root . \
+            --config .verification-output/trusted/.github/verification-maintenance/config.json \
+            --output .verification-output/context.json
+          model="$(jq -r '.model // empty' .verification-output/trusted/.github/verification-maintenance/config.json)"
+          case "$model" in
+            '') ;;
+            *[!A-Za-z0-9._:-]*)
+              echo 'The configured model is not a safe model identifier.' >&2
+              exit 1
+              ;;
+          esac
+          echo "VERIFICATION_MODEL=$model" >> "$GITHUB_ENV"
+
+      - name: Bootstrap the project verification environment
+        if: steps.prepare.outputs.ready == 'true'
+%%APP_SECRET_ENV%%
+        run: |
+          python3 .verification-output/trusted/.github/verification-maintenance/cli.py bootstrap \
+            --root . \
+            --config .verification-output/trusted/.github/verification-maintenance/config.json
+
+      - name: Render maintenance prompt
+        if: steps.prepare.outputs.ready == 'true'
+        run: |
+          python3 .verification-output/trusted/.github/verification-maintenance/cli.py prompt \
+            --root . \
+            --config .verification-output/trusted/.github/verification-maintenance/config.json \
+            --output .verification-output/trusted/.github/verification-maintenance/run-prompt.md
+
+      - name: Run Claude maintenance
+        if: steps.prepare.outputs.ready == 'true' && steps.prepare.outputs.provider == 'claude'
+        uses: anthropics/claude-code-action@v1
+%%APP_SECRET_ENV%%
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          prompt: >-
+            Treat ${{ github.workspace }} as the repository root.
+            Read ${{ github.workspace }}/.verification-output/trusted/.github/verification-maintenance/run-prompt.md,
+            resolve every relative project path against that repository root,
+            and carry out every instruction in the prompt.
+          claude_args: |
+            ${{ env.VERIFICATION_MODEL && format('--model {0}', env.VERIFICATION_MODEL) || '' }}
+            --allowedTools "Bash,Read,Write,Edit"
+
+      - name: Run Codex maintenance
+        if: steps.prepare.outputs.ready == 'true' && steps.prepare.outputs.provider == 'codex'
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56  # v1.11
+%%APP_SECRET_ENV%%
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .verification-output/trusted/.github/verification-maintenance/run-prompt.md
+          working-directory: .
+          model: ${{ env.VERIFICATION_MODEL }}
+          sandbox: workspace-write
+          codex-args: '["--config", "sandbox_workspace_write.network_access=true"]'
+          safety-strategy: drop-sudo
+          allow-users: '*'
+
+      - name: Build the publication bundle
+        if: steps.prepare.outputs.ready == 'true'
+        run: |
+          python3 .verification-output/trusted/.github/verification-maintenance/cli.py bundle \
+            --root . \
+            --config .verification-output/trusted/.github/verification-maintenance/config.json \
+            --report .verification-report.json \
+            --output .verification-output/bundle.json \
+            --base-sha '${{ steps.prepare.outputs.base_sha }}'
+
+      - name: Upload report and publication bundle
+        id: bundle-upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-maintenance-output-${{ github.run_attempt }}
+          retention-days: 30
+          path: |
+            .verification-report.json
+            .verification-output/context.json
+            .verification-output/bundle.json
+          include-hidden-files: true
+          if-no-files-found: warn
+
+      - name: Upload verification evidence
+        id: evidence-upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-maintenance-evidence-${{ github.run_attempt }}
+          retention-days: 30
+          path: .verification-evidence/
+          include-hidden-files: true
+          if-no-files-found: warn
+
+  publish:
+    needs: analyze
+    if: needs.analyze.outputs.ready == 'true' && needs.analyze.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+      actions: read
+
+    steps:
+      - name: Checkout the analyzed base revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.analyze.outputs.base_sha }}
+          path: project
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare unattached correction and receipt
+        id: publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFICATION_BUNDLE_ARTIFACT_ID: ${{ needs.analyze.outputs.bundle_artifact_id }}
+          VERIFICATION_EVIDENCE_ARTIFACT_ID: ${{ needs.analyze.outputs.evidence_artifact_id }}
+        run: |
+          python3 project/.github/verification-maintenance/cli.py prepare-publication \
+            --root project \
+            --config project/.github/verification-maintenance/config.json \
+            --output publication-receipt/receipt.json
+
+      # The private .git receipt witness must survive this upload in this job.
+      - name: Retain publication receipt before branch attachment
+        id: receipt
+        if: steps.publication.outputs.outcome == 'prepared'
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-maintenance-receipt-${{ github.run_attempt }}
+          retention-days: 30
+          path: publication-receipt/receipt.json
+          if-no-files-found: error
+
+      - name: Authenticate receipt and finalize publication
+        if: steps.publication.outputs.outcome == 'prepared'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFICATION_RECEIPT_ARTIFACT_ID: ${{ steps.receipt.outputs.artifact-id }}
+        run: |
+          python3 project/.github/verification-maintenance/cli.py finalize-publication \
+            --root project \
+            --config project/.github/verification-maintenance/config.json

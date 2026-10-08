@@ -3,10 +3,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { detect, resolvePackageManager } from './detect.mjs';
+import { detect, resolvePackageManager, PLAYWRIGHT_CONFIG_NAMES } from './detect.mjs';
 import { resolveLocation } from './manifest.mjs';
-
-const CONFIG_NAME = 'playwright.config.ts';
 
 // How each manager runs a project-local binary. npx resolves outside the
 // project under Yarn Berry's PnP, so a hardcoded npx breaks there; each
@@ -41,8 +39,10 @@ export function enginesFromConfig(configText, devices) {
   return [...engines].sort();
 }
 
+// The child's stdout goes to stderr: stdout carries only this script's JSON
+// result, and the human still sees the progress in the terminal.
 function defaultRun(command, args, options) {
-  execFileSync(command, args, { stdio: 'inherit', ...options });
+  execFileSync(command, args, { stdio: ['inherit', process.stderr, 'inherit'], ...options });
 }
 
 // Ensure the browser binaries for the scaffolded config are present. Playwright's
@@ -56,10 +56,14 @@ export function installBrowsers(targetPath, options = {}) {
   const webDir = resolveLocation(root, options);
   const webAbs = join(root, webDir);
 
-  const configPath = join(webAbs, CONFIG_NAME);
-  if (!existsSync(configPath)) {
-    return { status: 'no-config', message: `No ${webDir}/${CONFIG_NAME} — run the scaffolder first.` };
+  // The suite's config may carry any Playwright config name: a conform suite
+  // configured in .js is left as-is by the ownership gate, so keying on .ts
+  // alone would report no-config and fail setup for exactly that case.
+  const configName = PLAYWRIGHT_CONFIG_NAMES.find((name) => existsSync(join(webAbs, name)));
+  if (!configName) {
+    return { status: 'no-config', message: `No Playwright config in ${webDir} — run the scaffolder first.` };
   }
+  const configPath = join(webAbs, configName);
 
   let devices;
   try {
@@ -91,7 +95,9 @@ if (isMainModule) {
   const onlyShell = process.argv.includes('--only-shell');
   const pmFlag = process.argv.indexOf('--pm');
   const packageManager = pmFlag !== -1 ? process.argv[pmFlag + 1] : resolvePackageManager(detect(targetPath));
-  const result = installBrowsers(targetPath, { withDeps, onlyShell, packageManager });
+  const locationFlag = process.argv.indexOf('--location');
+  const location = locationFlag !== -1 ? process.argv[locationFlag + 1] : undefined;
+  const result = installBrowsers(targetPath, { withDeps, onlyShell, packageManager, location });
   if (result.status === 'no-config' || result.status === 'not-installed') {
     console.error(result.message);
     process.exit(1);

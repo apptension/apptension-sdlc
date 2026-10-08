@@ -1,8 +1,9 @@
 # apptension-e2e-testing
 
 Apptension E2E testing — generates Playwright end-to-end test specs
-from a ticket's description, unit tests, and a testing-guide doc,
-then verifies they run.
+from a ticket's description, its diff, and its unit tests — plus a
+testing-guide section when the ticket carries one — then verifies
+they run.
 
 ## When to use it
 
@@ -66,8 +67,9 @@ ticket.
   approval as the rest of the plan, never a second question. Each spec's
   first line is `// issue:<N>` — the committed record of which run
   produced it. Nothing else this skill writes belongs in the target
-  repo's history: add `.e2e-testing/test-plan-*.md`, `.e2e-testing/app.log`
-  and `.e2e-testing/app.pid` to its `.gitignore`. A repo with specs
+  repo's history: add `.e2e-testing/test-plan-*.md` to its `.gitignore`.
+  Booting the app adds `.e2e-testing/app.log` and `.e2e-testing/app.pid`
+  there itself. A repo with specs
   generated before this layout can migrate them with `migrate-specs.mjs` —
   see `skills/generate/SKILL.md`'s migration section for details.
 - `/apptension-e2e-testing:discover [issue] [target path]` — answers what

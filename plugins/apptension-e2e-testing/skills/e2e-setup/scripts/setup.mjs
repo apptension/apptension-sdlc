@@ -1,4 +1,5 @@
 import { realpathSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detect, resolvePackageManager } from './detect.mjs';
@@ -7,13 +8,14 @@ import { installPlaywright } from './install-playwright.mjs';
 import { installBrowsers } from './install-browsers.mjs';
 import { resolveWebServer } from './web-server.mjs';
 import { resolveLocation } from './manifest.mjs';
+import { ignoreInRepo } from './probe-port.mjs';
 
 // Orchestrate the post-wizard tail in one cd-free call. The pre-wizard
 // @playwright/test install (so list-devices can enumerate) stays a separate
 // step; this re-affirms it idempotently and is self-sufficient on a
 // desktop-only run. Order matches #105: detect -> scaffold -> install -> browsers.
 export function runSetup(targetPath, options = {}) {
-  const { browsers = ['chromium'], devices = [], resolutions = [], withDeps = false, onlyShell = false, packageManager, createMissing = false, run, location, authScheme, linter, typescript } = options;
+  const { browsers = ['chromium'], devices = [], resolutions = [], withDeps = false, onlyShell = false, packageManager, createMissing = false, run, location, linter, typescript } = options;
 
   // Resolve once so every downstream module gets an absolute path, independent
   // of the caller's cwd (the SKILL invites a relative target like `webapp`).
@@ -28,12 +30,21 @@ export function runSetup(targetPath, options = {}) {
   const suiteLocation = resolveLocation(root, options);
   const webServer = resolveWebServer(report, { suiteLocation });
 
-  const scaffoldResult = scaffold(root, { browsers, devices, resolutions, createMissing, webServer, packageManager: pm, location, authScheme, linter, typescript });
-  if (scaffoldResult.status === 'conform') {
-    return { status: 'conform', packageManager: pm, webServer, scaffold: scaffoldResult };
+  const scaffoldResult = scaffold(root, { browsers, devices, resolutions, createMissing, webServer, packageManager: pm, location, linter, typescript });
+  if (scaffoldResult.status === 'conform' || scaffoldResult.status === 'error') {
+    return { status: scaffoldResult.status, packageManager: pm, webServer, scaffold: scaffoldResult };
   }
+  // The bundled Playwright MCP server writes snapshots and console logs to
+  // .playwright-mcp/ at the repo root, which the suite-local .gitignore cannot
+  // reach. Resolve the git top level: a subdirectory target's own .gitignore
+  // would not cover it. Outside a repo, ignoreInRepo writes nothing.
+  const topLevel = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: root, encoding: 'utf8' });
+  ignoreInRepo(topLevel.status === 0 ? topLevel.stdout.trim() : root, '.playwright-mcp/');
 
   const installResult = installPlaywright(root, { packageManager: pm, run, location, linter, typescript });
+  if (installResult.status === 'error') {
+    return { status: 'error', packageManager: pm, webServer, scaffold: scaffoldResult, install: installResult };
+  }
   const browsersResult = installBrowsers(root, { withDeps, onlyShell, run, packageManager: pm, location });
 
   return {
@@ -42,6 +53,7 @@ export function runSetup(targetPath, options = {}) {
     webServer,
     scaffold: scaffoldResult,
     browsers: browsersResult,
+    install: installResult,
     rootFilesTouched: installResult.rootFilesTouched,
   };
 }
@@ -67,7 +79,6 @@ if (isMainModule) {
     packageManager: flag('--pm'),
     createMissing: process.argv.includes('--create-missing'),
     location: flag('--location'),
-    authScheme: flag('--auth'),
     linter: flag('--linter'),
     typescript: flag('--typescript'),
   });

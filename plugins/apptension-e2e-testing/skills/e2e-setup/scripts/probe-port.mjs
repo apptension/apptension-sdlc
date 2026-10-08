@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, openSync, closeSync, readFileSync, realpathSync } from 'node:fs';
-import { spawn as nodeSpawn, execFileSync } from 'node:child_process';
+import { appendFileSync, existsSync, mkdirSync, openSync, closeSync, readFileSync, realpathSync } from 'node:fs';
+import { spawn as nodeSpawn, execFileSync, spawnSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detect } from './detect.mjs';
@@ -67,6 +67,20 @@ function depsRequired(appDir) {
   } catch {
     return true;
   }
+}
+
+// Append `rel` to the repo's own .gitignore: the suite-local one cannot reach
+// .e2e-testing/, which sits at the repo root. resolve-app-url.mjs calls it for
+// its boot state too. `git check-ignore` exits 0 for any rule already covering
+// the path (the line itself, `*.log`, `.e2e-testing/`, a parent or global rule),
+// so a re-run adds nothing. Only exit 1 means "not ignored"; outside a git repo,
+// or without git, there is no status to keep clean.
+export function ignoreInRepo(root, rel) {
+  const { status } = spawnSync('git', ['check-ignore', '-q', rel], { cwd: root, stdio: 'ignore' });
+  if (status !== 1) return;
+  const path = join(root, '.gitignore');
+  const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  appendFileSync(path, `${existing && !existing.endsWith('\n') ? '\n' : ''}${rel}\n`);
 }
 
 function tailLog(logPath, lines = 20) {
@@ -143,6 +157,7 @@ export async function probeBoundPort(targetPath, options = {}) {
   }
 
   mkdirSync(join(root, STATE_DIR), { recursive: true });
+  ignoreInRepo(root, `${STATE_DIR}/probe.log`);
   const logPath = join(root, STATE_DIR, 'probe.log');
   const logFd = openSync(logPath, 'w');
   let child;

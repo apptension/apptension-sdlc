@@ -1,9 +1,10 @@
 import { existsSync, readFileSync, mkdtempSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative, sep } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { detect } from '../../e2e-setup/scripts/detect.mjs';
+import { logFilePath } from './resolve-app-url.mjs';
 
 export function selectSpecs(targetPath, specPaths) {
   const runnable = [];
@@ -84,16 +85,19 @@ export function listCommand(packageManager, specPaths) {
 }
 
 // Playwright nests one `suites` level per describe block, and a nested spec may
-// omit `file` — so the enclosing suite's file is carried down.
-function collectSpecs(suite, out, inheritedFile) {
+// omit `file` — so the enclosing suite's file is carried down. The describe
+// titles are carried down too: a describe loop registers same-titled tests on
+// one line, and only that path tells them apart. The top-level suite is the
+// file itself, so its title is not part of the path.
+function collectSpecs(suite, out, inheritedFile, describePath) {
   const file = suite.file ?? inheritedFile;
-  for (const spec of suite.specs ?? []) out.push({ ...spec, file: spec.file ?? file });
-  for (const child of suite.suites ?? []) collectSpecs(child, out, file);
+  for (const spec of suite.specs ?? []) out.push({ ...spec, file: spec.file ?? file, describePath });
+  for (const child of suite.suites ?? []) collectSpecs(child, out, file, [...describePath, child.title]);
 }
 
 export function flattenSpecs(jsonReport) {
   const out = [];
-  for (const suite of jsonReport.suites ?? []) collectSpecs(suite, out, undefined);
+  for (const suite of jsonReport.suites ?? []) collectSpecs(suite, out, undefined, []);
   return out;
 }
 
@@ -120,6 +124,24 @@ function rollUp(outcomes, fallback = 'not-run') {
   return PRECEDENCE.find((value) => outcomes.includes(value)) ?? fallback;
 }
 
+// discover's desktop-only choice skips a path on every mobile project with
+// this reason. The skip is a human's scope, so a test carrying it drops out of
+// the roll-up while another project of the same spec ran. A spec skipped on
+// every project keeps its `skipped`, since nothing verified it.
+export const DESKTOP_ONLY_SKIP = 'desktop-only path, chosen at discover';
+
+function isDesktopOnlySkip(test) {
+  return (
+    testOutcome(test) === 'skipped' &&
+    (test.annotations ?? []).some((a) => a.type === 'skip' && a.description === DESKTOP_ONLY_SKIP)
+  );
+}
+
+function gatingTests(tests) {
+  const ran = tests.filter((test) => !isDesktopOnlySkip(test));
+  return ran.length > 0 ? ran : tests;
+}
+
 const ANSI_PATTERN = /\[[0-9;]*m/g;
 const ERROR_LIMIT = 2000;
 
@@ -137,16 +159,47 @@ function firstError(results) {
   return message ? cleanError(message) : null;
 }
 
+// The first stack frame inside the spec file: the spec line that led to the
+// error. A page object throwing from the test callback has one inside the
+// callback; one a fixture called has none, or one inside a hook.
+const STACK_FRAME = /\(?([^\s()]+):(\d+):\d+\)?\s*$/;
+
+function firstSpecFrame(results, specFile) {
+  const withError = results.find((result) => (result.errors ?? []).length > 0);
+  const stack = withError?.errors?.[0]?.stack ?? '';
+  for (const line of stack.split('\n').slice(1)) {
+    const match = line.trim().match(STACK_FRAME);
+    if (match && (match[1] === specFile || match[1].endsWith(`/${specFile}`))) return `${match[1]}:${match[2]}`;
+  }
+  return null;
+}
+
+// Where the first error was thrown, which `location` (the test's declaration)
+// cannot say: a hook, a fixture or a helper the test called.
+function firstErrorLocation(results) {
+  const withError = results.find((result) => (result.errors ?? []).length > 0);
+  const location = withError?.errors?.[0]?.location;
+  return location?.file ? `${location.file}:${location.line}` : null;
+}
+
 // The scaffolded fixture attaches this by name on a failing case (see
 // scaffold.mjs FIXTURES_BASE): the >=400 responses seen while the case ran.
 // It is read back onto the result below, so it is consumed here rather than
 // listed among the generic artifacts.
 const NETWORK_FAILURES_ATTACHMENT = 'network-failures';
-const CONSUMED_ATTACHMENTS = new Set([NETWORK_FAILURES_ATTACHMENT]);
+// The fixture attaches this by name too, on a single-worker failure: the lines
+// the app wrote to .e2e-testing/app.log while the case ran. Read back onto the
+// result below alongside the network failures, so both are consumed here rather
+// than listed among the generic artifacts.
+const APP_LOG_ATTACHMENT = 'app-log';
+const CONSUMED_ATTACHMENTS = new Set([NETWORK_FAILURES_ATTACHMENT, APP_LOG_ATTACHMENT]);
 
 // Cap so a pathological run can't bloat the result: the newest entries win,
 // since the tail is what sits closest to the failure.
 const MAX_NETWORK_FAILURES = 50;
+// Log lines run noisier than network entries, so the app-log tail gets more
+// room; the fixture caps to the same count before attaching.
+const MAX_APP_LOG_LINES = 200;
 
 // Playwright already wrote the trace/screenshot/video into test-results/ and
 // names each under a result's `attachments`. Collect them across every attempt
@@ -201,21 +254,98 @@ function collectNetworkFailures(test) {
   }
 }
 
-function describeFailure(specs, result) {
+function collectAppLog(test) {
+  const body = readAttachment(test, APP_LOG_ATTACHMENT);
+  if (body === null) return null;
+  try {
+    const parsed = JSON.parse(body);
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    return parsed.slice(-MAX_APP_LOG_LINES);
+  } catch {
+    return null;
+  }
+}
+
+// The scaffolded fixture annotates a failed test that started logged in and
+// ended on the E2E_LOGIN_URL page (see scaffold.mjs FIXTURES_BASE), naming the
+// auth mode it ran under. It is a diagnosis, never a result change. The hint
+// names the cause and the check: under the shared mode rotation is one
+// candidate, under per-worker mode reuse of a rotated token across tests is
+// handled, while pages refreshing at once inside one test are not.
+const SESSION_EXPIRED_ANNOTATION = 'session-expired';
+
+export const SESSION_EXPIRED_HINTS = {
+  shared:
+    'The test started logged in and ended on the E2E_LOGIN_URL page, so the session was lost mid-run. ' +
+    'If the backend rotates refresh tokens and blacklists the used one, set E2E_AUTH_MODE=per-worker in the suite .env, ' +
+    'or raise the access-token lifetime in the test environment. Otherwise check the token lifetime and the app logout paths.',
+  'per-worker':
+    'The test started logged in and ended on the E2E_LOGIN_URL page under E2E_AUTH_MODE=per-worker, so a rotated token reused across tests is not the cause. ' +
+    'Check the access- and refresh-token lifetimes, pages in this test refreshing the token at the same time, and the app logout paths. ' +
+    'Playwright replaces a worker after a failed test, and the next worker starts with a fresh login.',
+};
+
+// Newer Playwright reports runtime annotations on each result, older on the
+// test, so both are read.
+function sessionExpired(test) {
+  const annotations = [...(test.annotations ?? []), ...(test.results ?? []).flatMap((result) => result.annotations ?? [])];
+  const found = annotations.find((annotation) => annotation?.type === SESSION_EXPIRED_ANNOTATION);
+  if (!found) return null;
+  const authMode = found.description === 'per-worker' ? 'per-worker' : 'shared';
+  return { authMode, hint: SESSION_EXPIRED_HINTS[authMode] };
+}
+
+// One entry per failing test would repeat a spec failing the same way on eight
+// projects eight times, and hide that the projects are the pattern. So tests
+// sharing title (describe path included), location and error collapse into
+// one entry listing their projects. Artifact paths differ per project, so each keeps its project;
+// networkFailures, appLog and sessionExpired come from the first project listed, since
+// merging them would mix evidence from different runs.
+function describeFailures(specs, result) {
+  const failures = [];
+  const byKey = new Map();
+  let failureCount = 0;
   for (const spec of specs) {
     for (const test of spec.tests ?? []) {
       if (testOutcome(test) !== result) continue;
-      const artifacts = collectArtifacts(test);
+      failureCount += 1;
+      const project = test.projectName ?? null;
+      const location = `${spec.file}:${spec.line}`;
+      const error = firstError(test.results ?? []);
+      const errorLocation = firstErrorLocation(test.results ?? []);
+      const specFrame = firstSpecFrame(test.results ?? [], spec.file);
+      const artifacts = collectArtifacts(test).map((artifact) => ({ project, ...artifact }));
+      // Playwright's own ' › ' join, so the title reads as the list reporter prints it.
+      const title = [...(spec.describePath ?? []), spec.title].join(' › ');
+      const key = JSON.stringify([title, location, error, errorLocation, specFrame]);
+
+      const existing = byKey.get(key);
+      if (existing) {
+        existing.projects.push(project);
+        if (artifacts.length > 0) existing.artifacts = [...(existing.artifacts ?? []), ...artifacts];
+        continue;
+      }
+
       const networkFailures = collectNetworkFailures(test);
-      return {
-        failingTest: { title: spec.title, location: `${spec.file}:${spec.line}` },
-        error: firstError(test.results ?? []),
+      const appLog = collectAppLog(test);
+      const expired = sessionExpired(test);
+      const entry = {
+        title,
+        location,
+        ...(errorLocation ? { errorLocation } : {}),
+        ...(specFrame ? { specFrame } : {}),
+        projects: [project],
+        error,
         ...(artifacts.length > 0 ? { artifacts } : {}),
         ...(networkFailures ? { networkFailures } : {}),
+        ...(appLog ? { appLog } : {}),
+        ...(expired ? { sessionExpired: expired } : {}),
       };
+      byKey.set(key, entry);
+      failures.push(entry);
     }
   }
-  return null;
+  return { failureCount, failures };
 }
 
 // Report paths are relative to Playwright's rootDir; runner paths to the
@@ -296,13 +426,13 @@ export function parseReport(jsonReport, entries, { filtering = false } = {}) {
     const resolvedFile = resolvedFiles[index];
     const specs = resolvedFile === null ? [] : reported.filter((spec) => spec.file === resolvedFile);
 
-    const tests = specs.flatMap((spec) => spec.tests ?? []);
+    const tests = gatingTests(specs.flatMap((spec) => spec.tests ?? []));
     const result = rollUp(tests.map(testOutcome), unreported);
     const attempts = Math.max(0, ...tests.map((test) => (test.results ?? []).length));
 
     const base = { specPath: entry.specPath, result, attempts };
     if (result === 'passed' || result === 'not-run' || result === 'filtered') return base;
-    return { ...base, ...(describeFailure(specs, result) ?? { failingTest: null, error: null }) };
+    return { ...base, ...describeFailures(specs, result) };
   });
 }
 
@@ -377,7 +507,7 @@ export function runSpecs(targetPath, specPaths, options = {}) {
 
   const { runnable, missing } = selectSpecs(targetPath, specPaths);
 
-  const detected = detect(targetPath);
+  const detected = detect(targetPath, { location });
   const resolved = resolveLocation(detected, specPaths, location);
   if (resolved.status !== 'resolved') return { ...resolved, specPaths };
 
@@ -423,6 +553,10 @@ export function runSpecs(targetPath, specPaths, options = {}) {
         PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath,
         PLAYWRIGHT_HTML_OPEN: 'never',
         PLAYWRIGHT_HTML_OUTPUT_DIR: htmlReport,
+        // Absolute, because the fixture runs with cwd at the Playwright package
+        // dir, not the repo root — it reads this to slice the boot log for a
+        // single-worker failure.
+        E2E_APP_LOG_PATH: resolve(logFilePath(targetPath)),
       },
     });
 

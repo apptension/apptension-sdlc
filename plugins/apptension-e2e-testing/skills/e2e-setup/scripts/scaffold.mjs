@@ -1,30 +1,28 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, realpathSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, realpathSync } from 'node:fs';
+import { basename, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { detect, resolveTestIdAttribute, resolvePackageManager, resolveLinter } from './detect.mjs';
+import {
+  detect,
+  resolveTestIdAttribute,
+  resolvePackageManager,
+  resolveLinter,
+  resolveBiome,
+  reachesBiomePlaywrightMin,
+  BIOME_PLAYWRIGHT_MIN,
+  PLAYWRIGHT_CONFIG_NAMES,
+} from './detect.mjs';
 import { resolveWebServer, runScriptCommand } from './web-server.mjs';
 import { ENV_VARS, resolveEnvValues, writeEnvFile } from './env.mjs';
-import {
-  MANIFEST_NAME,
-  WEB_DIR,
-  readRootManifest,
-  resolveLocation,
-  rootRelativeCwd,
-  manifestSpecsDir,
-  manifestPagesDir,
-  manifestPom,
-  manifestAuthScheme,
-  manifestLinter,
-  manifestTypescript,
-  resolveOverride,
-} from './manifest.mjs';
+import { WEB_DIR, resolveLocation, rootRelativeCwd, resolveOverride } from './manifest.mjs';
 
 // Re-exported so existing importers (write-specs.mjs, write-auth-setup.mjs,
-// persist-pom.mjs, scaffold.test.ts) keep resolving these from scaffold.mjs.
-export { MANIFEST_NAME, WEB_DIR, manifestSpecsDir, manifestPagesDir, manifestPom };
+// scaffold.test.ts) keep resolving this from scaffold.mjs.
+export { WEB_DIR };
 
-// Sub-directory names, relative to the suite location.
-const SCAFFOLD_DIRS = { specs: 'specs', pages: 'pages', fixtures: 'fixtures' };
+// Sub-directory names, relative to the suite location. Exported so
+// write-specs.mjs's resolvers can join them onto an agent-passed location
+// without restating the names.
+export const SCAFFOLD_DIRS = { specs: 'specs', pages: 'pages', fixtures: 'fixtures' };
 
 // ENV_VARS comes from env.mjs, which also resolves each name's value: one list
 // feeds both the committed .env.example and the .env setup writes.
@@ -114,13 +112,74 @@ function dynamicNpmScripts(browsers, devices, resolutions) {
 // alone. Added when we wrote our config, or an existing flat config is present.
 const LINT_SCRIPT = { lint: 'eslint .' };
 
+// The Biome suite's lint script. Added only when the suite holds a Biome config
+// and the repo's Biome carries the Playwright rules, so it never runs a Biome
+// that rejects the config.
+const BIOME_LINT_SCRIPT = { lint: 'biome lint .' };
+
+// Added only to a TypeScript suite, beside the tsconfig.json applyTsconfig
+// writes. Playwright strips types without checking them, so this is the one
+// place a type error in a spec or fixture fails before an editor shows it.
+const TYPECHECK_SCRIPT = { typecheck: 'tsc --noEmit' };
+
+// Root configs a suite tsconfig.json extends, first hit wins. An Nx repo keeps
+// its compiler options in tsconfig.base.json, and its root tsconfig.json (if
+// any) is often a solution file with no options of its own.
+const ROOT_TSCONFIG_NAMES = ['tsconfig.base.json', 'tsconfig.json'];
+
+// The standalone suite config, for a repo with no root tsconfig to extend.
+// NodeNext needs TypeScript 4.7, and TypeScript 6 deprecates Node resolution,
+// so no one pair of module settings works on every version. The scaffold runs
+// before the suite's TypeScript is installed, so it writes NodeNext, and
+// install-playwright rewrites the file to the legacy pair when the installed
+// version is older. Exported so install-playwright can tell this file, left
+// as written, from one somebody edited.
+export function renderStandaloneTsconfig({ legacy = false } = {}) {
+  return JSON.stringify(
+    {
+      compilerOptions: {
+        target: 'ES2022',
+        ...(legacy ? { module: 'CommonJS', moduleResolution: 'Node' } : { module: 'NodeNext', moduleResolution: 'NodeNext' }),
+        strict: true,
+        noEmit: true,
+        skipLibCheck: true,
+        types: ['node'],
+      },
+      include: ['**/*.ts'],
+    },
+    null,
+    2,
+  ) + '\n';
+}
+
+// The suite's own program: every .ts file in the package, Node types for
+// `node:fs` and `process.env`, and no output. Extending a root config also
+// resets three keys that config may set for the app. Its `rootDir` would fail
+// every suite file with TS6059. Its `files` list is inherited through
+// `extends`, which would type-check the app's own code here. Its `exclude` is
+// inherited too, and one that keeps the app's `*.spec.ts` files out would
+// keep the suite's specs out with them.
+function renderTsconfig(rootConfig, location) {
+  if (rootConfig) {
+    // A bare name in `extends` resolves as a package, so a path always starts
+    // with `.`.
+    const path = relative(location, rootConfig).split(sep).join('/');
+    return JSON.stringify(
+      { extends: path.startsWith('.') ? path : `./${path}`, compilerOptions: { types: ['node'], noEmit: true, rootDir: '.' }, files: [], include: ['**/*.ts'], exclude: ['node_modules'] },
+      null,
+      2,
+    ) + '\n';
+  }
+  return renderStandaloneTsconfig();
+}
+
 // Flat config for the self-contained sub-package. .mjs, not .js, because the
 // scaffolded package.json has no "type": "module". Enables the plugin's
 // recommended rules — where missing-playwright-await and no-networkidle are
 // already errors — and promotes no-wait-for-timeout from its recommended `warn`
 // to `error`, so a spec that sleeps or drops an await fails lint, not a run.
 // The TS parser is what lets eslint read the `.ts` specs at all.
-const ESLINT_CONFIG = `import playwright from 'eslint-plugin-playwright';
+export const ESLINT_CONFIG = `import playwright from 'eslint-plugin-playwright';
 import parser from '@typescript-eslint/parser';
 
 export default [
@@ -139,6 +198,10 @@ export default [
     rules: {
       ...playwright.configs['flat/recommended'].rules,
       'playwright/no-wait-for-timeout': 'error',
+      // Page Object specs assert through <page>.assert.<matcher>() methods
+      // named like Playwright's own matchers (toBeLoaded, toShowGuest). The
+      // rule matches only a call's last name, so the pattern keys on that.
+      'playwright/expect-expect': ['warn', { assertFunctionPatterns: ['^to[A-Z]'] }],
     },
   },
 ];
@@ -163,6 +226,72 @@ export function hasFlatEslintConfig(webAbs) {
 // rather than leave it working.
 const LEGACY_ESLINT_CONFIG_NAMES = ['.eslintrc.js', '.eslintrc.cjs', '.eslintrc.yml', '.eslintrc.yaml', '.eslintrc.json', '.eslintrc'];
 const ESLINT_CONFIG_NAMES = [...FLAT_ESLINT_CONFIG_NAMES, ...LEGACY_ESLINT_CONFIG_NAMES];
+
+// Nested config for a Biome repo's suite. `root: false` marks it nested and
+// `extends: "//"` inherits the repo's root config, so the repo's own formatter
+// and rules still apply and these rules add to them. Every Playwright rule sits
+// in Biome's nursery group, which the `playwright` domain does not switch on,
+// so each rule is named. `useExpect` is off: it takes no options and counts
+// only a call rooted at `expect` or `assert`, so it flags every Page Object
+// spec. The assertion plugin covers the missing-assertion check instead.
+export const BIOME_CONFIG = `{
+  "root": false,
+  "extends": "//",
+  "plugins": ["./expect-assertion.grit"],
+  "linter": {
+    "rules": {
+      "nursery": {
+        "noPlaywrightWaitForTimeout": "error",
+        "noPlaywrightMissingAwait": "error",
+        "noPlaywrightNetworkidle": "error",
+        "useExpect": "off"
+      }
+    }
+  }
+}
+`;
+
+// Biome's counterpart to the ESLint suite's playwright/expect-expect: a test
+// with no expect() call and no Page Object assertion gets a warning. Page
+// Objects assert through <page>.assert.<matcher>() methods named like
+// Playwright's own matchers, so a call to any method named to<Matcher> counts,
+// the same `^to[A-Z]` pattern the ESLint config sets. `test(name, body)` and
+// `test(name, details, body)` are matched, bare and with each modifier that
+// declares a test. The body has to be a function, because a conditional
+// `test.skip(condition, 'reason')` inside a test has the same shape with a
+// string where the callback goes. validate-specs recognises the plugin's
+// diagnostic by its message, so the message is exported with it.
+export const BIOME_ASSERTION_MESSAGE = 'Test has no assertion. Call expect() or a Page Object assertion method named to<Matcher>().';
+export const BIOME_ASSERTION_PLUGIN = `language js
+
+or {
+  \`test($name, $body)\`,
+  \`test($name, $details, $body)\`,
+  \`test.$modifier($name, $body)\` where { $modifier <: or { \`only\`, \`skip\`, \`fixme\`, \`fail\`, \`slow\` } },
+  \`test.$modifier($name, $details, $body)\` where { $modifier <: or { \`only\`, \`skip\`, \`fixme\`, \`fail\`, \`slow\` } }
+} where {
+  $body <: or { JsArrowFunctionExpression(), JsFunctionExpression() },
+  $body <: not contains \`expect($...)\`,
+  $body <: not contains \`$object.$matcher($...)\` where { $matcher <: r"^to[A-Z].*" },
+  register_diagnostic(
+    span=$name,
+    message="${BIOME_ASSERTION_MESSAGE}",
+    severity="warn"
+  )
+}
+`;
+const BIOME_PLUGIN_FILE = 'expect-assertion.grit';
+
+// Suite-level Biome config filenames. Either one means the suite already has
+// its own Biome config, which is left as it is.
+export const BIOME_CONFIG_NAMES = ['biome.json', 'biome.jsonc'];
+
+// True when the suite holds a Biome config, ours or one already there.
+// install-playwright uses this to decide whether to add @biomejs/biome and run
+// the lint; scaffold runs before it, so ours is already on disk.
+export function hasBiomeConfig(webAbs) {
+  return BIOME_CONFIG_NAMES.some((name) => existsSync(join(webAbs, name)));
+}
 const STORAGE_STATE = '.auth/user.json';
 
 // Desktop browser keys map to a project name + Playwright device descriptor.
@@ -209,19 +338,155 @@ function resolveProjects(browsers, devices, resolutions) {
 // otherwise hide), while console.error output is attached as a report warning
 // annotation — surfaced for a human/agent to triage, but never a failure, since
 // benign console.error is common and would make the suite flaky.
-const FIXTURES_BASE = `import { test as base, expect } from '@playwright/test';
+// It also carries the auth mode: the shared saved login by default, or a login
+// per worker under E2E_AUTH_MODE=per-worker, and it annotates a failed
+// logged-in test that ends on the login page as `session-expired`.
+// The triple-slash reference loads the Node types for `node:fs` and
+// `process.env` on its own: TypeScript 6+ includes no @types package unless
+// `types` names it. The suite's tsconfig.json names it too, and the reference
+// keeps the file checking under a suite tsconfig.json that does not.
+const FIXTURES_BASE = `/// <reference types="node" />
+import { test as base, expect, type BrowserContextOptions, type Page } from '@playwright/test';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { login } from './login';
 
 export * from '@playwright/test';
 
-export const test = base.extend({
+// E2E_AUTH_MODE=per-worker: each worker logs in on its own through
+// fixtures/login.ts and writes its session back after every test, for backends
+// that rotate refresh tokens and blacklist the used one. There, one shared
+// saved login is spent by the first refresh and every later test is logged
+// out. Any other value keeps the shared saved login in .auth/user.json.
+const perWorker = process.env.E2E_AUTH_MODE === 'per-worker';
+
+// True when the page sits on the E2E_LOGIN_URL page. An absolute value must
+// match the origin too; a relative one matches on the page's own origin. A
+// query string is ignored, a trailing slash on either side is ignored, and a
+// hash route (/#/login) is compared when the value has one.
+const trimSlash = (path: string) => path.replace(/\\/+$/, '') || '/';
+const hashRoute = (hash: string) => trimSlash(hash.split('?')[0]);
+
+function isAbsoluteUrl(value: string): boolean {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function onLoginPage(page: Page): boolean {
+  const loginUrl = process.env.E2E_LOGIN_URL;
+  if (!loginUrl) return false;
+  try {
+    const current = new URL(page.url());
+    const target = new URL(loginUrl, current);
+    if (isAbsoluteUrl(loginUrl) && target.origin !== current.origin) return false;
+    if (trimSlash(current.pathname) !== trimSlash(target.pathname)) return false;
+    return !target.hash || hashRoute(current.hash) === hashRoute(target.hash);
+  } catch {
+    return false;
+  }
+}
+
+// The project's browser-context options, so the per-worker login runs on the
+// same device, locale and network settings as the tests: every
+// BrowserContextOptions key except the ones the test runner owns (storageState,
+// recordVideo, recordHar, logger). The project's contextOptions merge
+// underneath, and a top-level option wins, as it does in Playwright.
+const CONTEXT_OPTIONS = [
+  'acceptDownloads', 'baseURL', 'bypassCSP', 'clientCertificates', 'colorScheme', 'contrast',
+  'deviceScaleFactor', 'extraHTTPHeaders', 'forcedColors', 'geolocation', 'hasTouch', 'httpCredentials',
+  'ignoreHTTPSErrors', 'isMobile', 'javaScriptEnabled', 'locale', 'offline', 'permissions', 'proxy',
+  'reducedMotion', 'screen', 'serviceWorkers', 'strictSelectors', 'timezoneId', 'userAgent', 'viewport',
+] as const;
+
+function contextOptions(use: object): BrowserContextOptions {
+  const source = use as Record<string, unknown>;
+  const picked = CONTEXT_OPTIONS.filter((key) => source[key] !== undefined).map((key) => [key, source[key]]);
+  return { ...(source.contextOptions as BrowserContextOptions | undefined), ...Object.fromEntries(picked) };
+}
+
+// A test started logged in when its storage state carries any cookie or
+// origin, inline or in the file it names. A spec or project that opts out with
+// an empty state is left alone. An unreadable file counts as a session, and
+// Playwright reports the file itself.
+function hasSession(state: unknown): boolean {
+  if (!state) return false;
+  if (typeof state === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(state, 'utf8'));
+      return typeof parsed === 'object' && hasSession(parsed);
+    } catch {
+      return true;
+    }
+  }
+  const { cookies = [], origins = [] } = state as { cookies?: unknown[]; origins?: unknown[] };
+  return cookies.length > 0 || origins.length > 0;
+}
+
+
+export const test = base.extend<{}, { workerStorageState: string | undefined }>({
+  // Per-worker mode only: a fresh login at every worker start. A file left by
+  // an earlier run holds a token that has already rotated, so it is
+  // overwritten, never reused. A project with no saved login, such as setup
+  // or one pinned to an empty state, gets none: it stays logged out.
+  workerStorageState: [
+    async ({ browser }, use, workerInfo) => {
+      if (!perWorker || !hasSession(workerInfo.project.use.storageState)) return use(undefined);
+      const file = \`.auth/worker-\${workerInfo.parallelIndex}.json\`;
+      const context = await browser.newContext({ ...contextOptions(workerInfo.project.use), storageState: undefined });
+      await login(await context.newPage());
+      await context.storageState({ path: file });
+      await context.close();
+      await use(file);
+    },
+    { scope: 'worker' },
+  ],
+  // The worker file replaces the project's saved login only; a test-level
+  // override (test.use({ storageState })) is kept.
+  storageState: async ({ storageState, workerStorageState }, use, testInfo) => {
+    const projectState = testInfo.project.use.storageState;
+    const projectDefault = hasSession(projectState) && JSON.stringify(storageState) === JSON.stringify(projectState);
+    await use(workerStorageState && projectDefault ? workerStorageState : storageState);
+  },
+  // A failed logged-in test with a page left on the login page lost its
+  // session: annotate it for run-specs, whether the test used page or opened
+  // its own pages. In per-worker mode every test context then writes its
+  // session back to the worker file, because a rotated refresh token lives only
+  // in this context until it is written. A page left on the login page means
+  // the worker logs in again first and saves a live session. Only a test that
+  // ran on the worker's own file writes; a test on another saved login (a
+  // second role) would overwrite it.
+  context: async ({ context, storageState, workerStorageState }, use, testInfo) => {
+    await use(context);
+    const stale = hasSession(storageState) ? context.pages().find((page) => onLoginPage(page)) : undefined;
+    if (stale && testInfo.status !== testInfo.expectedStatus) {
+      testInfo.annotations.push({ type: 'session-expired', description: perWorker ? 'per-worker' : 'shared' });
+    }
+    if (!workerStorageState || storageState !== workerStorageState) return;
+    if (stale) {
+      try {
+        await login(stale);
+      } catch (error) {
+        testInfo.annotations.push({ type: 'warning', description: \`per-worker auth: re-login failed: \${(error as Error).message}\` });
+        return;
+      }
+    }
+    try {
+      await context.storageState({ path: workerStorageState });
+    } catch (error) {
+      testInfo.annotations.push({ type: 'warning', description: \`per-worker auth: saving the session failed: \${(error as Error).message}\` });
+    }
+  },
   page: async ({ page }, use, testInfo) => {
-    const pageErrors = [];
-    const consoleErrors = [];
+    const pageErrors: string[] = [];
+    const consoleErrors: string[] = [];
     // Responses >= 400 during the case: the signal that usually explains a
     // failure a screenshot only shows the symptom of. Method + URL + status.
     // Scoped to this page's context, so it is exclusive to this case even
     // under parallel workers.
-    const networkFailures = [];
+    const networkFailures: { method: string; url: string; status: number }[] = [];
     page.on('pageerror', (error) => pageErrors.push(error.message));
     page.on('console', (message) => {
       if (message.type() === 'error') consoleErrors.push(message.text());
@@ -232,6 +497,16 @@ export const test = base.extend({
       }
     });
 
+    // The boot step writes one app.log for the whole run. Under a single
+    // worker cases run one at a time, so the byte slice a case appends between
+    // its start and end is exclusive to it; under parallel workers that slice
+    // would splice in other concurrent cases' lines, so it is not captured.
+    // E2E_APP_LOG_PATH is set by run-specs; a direct \`playwright test\` leaves
+    // it unset, so app-log capture is skipped then.
+    const appLogPath = process.env.E2E_APP_LOG_PATH;
+    const serial = testInfo.config.workers === 1;
+    const appLogStart = serial && appLogPath && existsSync(appLogPath) ? statSync(appLogPath).size : 0;
+
     await use(page);
 
     for (const text of consoleErrors) {
@@ -241,11 +516,26 @@ export const test = base.extend({
     // Attach before the throwing assertion below, so a case that fails *on*
     // that assertion still carries the evidence. A clean pass attaches
     // nothing, keeping its result small. Cap before attaching (newest kept):
-    // a polling failure can produce thousands of entries and the attachment
-    // itself must not balloon; the runner caps again on read.
+    // an unbounded slice must not balloon the attachment; the runner caps
+    // again on read.
     const failed = testInfo.status !== testInfo.expectedStatus;
-    if ((failed || pageErrors.length > 0) && networkFailures.length > 0) {
-      await testInfo.attach('network-failures', { body: JSON.stringify(networkFailures.slice(-50)), contentType: 'application/json' });
+
+    if (failed || pageErrors.length > 0) {
+      if (networkFailures.length > 0) {
+        await testInfo.attach('network-failures', { body: JSON.stringify(networkFailures.slice(-50)), contentType: 'application/json' });
+      }
+      if (appLogPath && !serial) {
+        // The shared log cannot be sliced per case under parallel workers, so
+        // record why the slice is absent rather than leaving it silent.
+        testInfo.annotations.push({
+          type: 'warning',
+          description: 'app-log: slice skipped under parallel execution (workers > 1); re-run with a single worker to capture it',
+        });
+      } else if (appLogPath && existsSync(appLogPath)) {
+        const slice = readFileSync(appLogPath).subarray(appLogStart).toString('utf8');
+        const lines = slice.split('\\n').filter((line) => line.length > 0).slice(-200);
+        if (lines.length > 0) await testInfo.attach('app-log', { body: JSON.stringify(lines), contentType: 'application/json' });
+      }
     }
 
     expect(pageErrors, \`uncaught page errors:\\n\${pageErrors.join('\\n')}\`).toEqual([]);
@@ -276,14 +566,66 @@ export function isRegeneratableAuthSetup(content) {
   return content.includes(AUTH_SETUP_MARKER) || content.includes(LEGACY_STUB_SIGNAL);
 }
 
+// A repo scaffolded before AUTH_SETUP_MARKER was added to playwright.config.ts
+// (see fullConfig below) has a marker-less config that still carries this
+// .env-loader comment line, which fullConfig has always emitted, current
+// template included — a hand-authored config has neither. Kept verbatim, not
+// re-derived, so it can never drift from the string fullConfig actually
+// emits.
+export const LEGACY_CONFIG_SIGNAL = "Fill process.env from this package's .env";
+
+// Overwritable by scaffold's config-ownership check below: carries the marker
+// (current or a prior working render), OR predates the marker but is still
+// recognizably fullConfig's own output (the .env-loader comment survives
+// untouched either way). AUTH_SETUP_MARKER doubles as the config's own
+// generated-marker here — fullConfig stamps the same literal into
+// playwright.config.ts (see line ~415) that renderAuthSetup stamps into
+// auth.setup.ts, so one marker covers both files.
+export function isRegeneratableConfig(content) {
+  return content.includes(AUTH_SETUP_MARKER) || content.includes(LEGACY_CONFIG_SIGNAL);
+}
+
+// The Playwright config actually present under a suite location, as
+// { name, path }, or null when none is. PLAYWRIGHT_CONFIG_NAMES order decides
+// which wins when several exist — the .ts the scaffolder owns comes first. The
+// create/report path reads the real filename from here rather than assuming
+// playwright.config.ts, so a suite hand-configured in .js is gated and reported
+// against the config it actually has, not a .ts that was never there.
+function presentPlaywrightConfig(webAbs) {
+  for (const name of PLAYWRIGHT_CONFIG_NAMES) {
+    const path = join(webAbs, name);
+    if (existsSync(path)) return { name, path };
+  }
+  return null;
+}
+
+// True when the scaffolder may author playwright.config.ts here: either no
+// config is present at all, or the only one present is our own regeneratable
+// .ts. Any other config — a hand-authored .ts, or a .js/.mjs/.cjs in any
+// form — means the suite is not ours, so we neither clobber it nor drop a
+// competing .ts beside it. classify() calls a spec-less foreign suite 'fresh',
+// so ownership, not mode, is the gate.
+function ownsConfigAt(webAbs) {
+  const present = presentPlaywrightConfig(webAbs);
+  if (!present) return true;
+  return present.name === 'playwright.config.ts' && isRegeneratableConfig(readFileSync(present.path, 'utf8'));
+}
+
 // One template for both the stub and the working file, so the two cannot
 // drift. No opts → the stub: goto '/', login lines commented, and a comment
 // stating plainly it ships as a stub, not a working login. With selectors →
-// the working file: goto the login URL, fill/submit with process.env creds,
-// wait for the post-login URL. Either way it imports from ./fixtures/base so
-// the page-error listener fails setup on a login-page crash.
+// the working file: call login() from fixtures/login.ts (the one copy of the
+// selectors, which per-worker mode in fixtures/base.ts reuses), which asserts
+// the login form is gone, then save the state. Either way it imports from
+// ./fixtures/base so the page-error listener fails setup on a login-page crash.
+// Each branch ends on an assertion (the page rendered), so the file
+// passes eslint-plugin-playwright's expect-expect rule.
 export function renderAuthSetup(opts) {
-  const header = `import { test as setup } from './fixtures/base';
+  const imports = opts
+    ? `import { test as setup, expect } from './fixtures/base';
+import { login } from './fixtures/login';`
+    : `import { test as setup, expect } from './fixtures/base';`;
+  const header = `${imports}
 
 // ${AUTH_SETUP_MARKER} — safe to regenerate; edits here are overwritten.
 
@@ -301,22 +643,65 @@ setup('authenticate', async ({ page }) => {`;
   // or re-run setup once E2E_LOGIN_URL / E2E_USER_EMAIL / E2E_USER_PASSWORD are
   // set in .env (gitignored). See .env.example.
   await page.goto('/');
+  await expect(page.locator('body')).toBeVisible();
   // await page.getByLabel('Email').fill(process.env.E2E_USER_EMAIL);
   // await page.getByLabel('Password').fill(process.env.E2E_USER_PASSWORD);
   // await page.getByRole('button', { name: 'Sign in' }).click();
   // await page.waitForURL('**/');
 ${footer}`;
   }
-  const { emailSelector, passwordSelector, submitSelector, waitUrl } = opts;
   return `${header}
-  // Credentials come from environment variables (names only; set real values
-  // in .env, which is gitignored). See .env.example.
-  await page.goto(process.env.E2E_LOGIN_URL);
-  await page.${emailSelector}.fill(process.env.E2E_USER_EMAIL);
-  await page.${passwordSelector}.fill(process.env.E2E_USER_PASSWORD);
+  // The login steps live in fixtures/login.ts, which per-worker mode reuses.
+  // login() itself asserts the form is gone; a single-page app may log in
+  // without leaving the URL, so the page is only checked for having rendered.
+  await login(page);
+  await expect(page.locator('body')).toBeVisible();
+${footer}`;
+}
+
+// fixtures/login.ts: the app's login steps, in one place. auth.setup.ts calls
+// it once for the shared saved login; fixtures/base.ts calls it per worker when
+// E2E_AUTH_MODE=per-worker. It imports only from @playwright/test, so base.ts
+// can import it without a cycle. The stub throws, and only per-worker mode
+// calls it, so a stub suite in the shared mode never reaches it.
+export function renderLogin(opts) {
+  if (!opts) {
+    return `import type { Page } from '@playwright/test';
+
+// ${AUTH_SETUP_MARKER} — safe to regenerate; edits here are overwritten.
+
+// STUB — not a working login. Only E2E_AUTH_MODE=per-worker calls this.
+export async function login(page: Page): Promise<void> {
+  throw new Error(
+    \`fixtures/login.ts is a stub — run e2e-setup's write-auth-setup, or write the app's login steps here (page: \${page.url()})\`,
+  );
+}
+`;
+  }
+  const { emailSelector, passwordSelector, submitSelector, waitUrl } = opts;
+  return `/// <reference types="node" />
+import { expect, type Page } from '@playwright/test';
+
+// ${AUTH_SETUP_MARKER} — safe to regenerate; edits here are overwritten.
+
+// Credentials come from environment variables (names only; set real values
+// in .env, which is gitignored). See .env.example. An unset one fails here,
+// by name, and keeps this file (and base.ts, which imports it) tsc --strict.
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(\`\${name} is not set — fill it in the suite's .env\`);
+  return value;
+}
+
+export async function login(page: Page): Promise<void> {
+  await page.goto(requireEnv('E2E_LOGIN_URL'));
+  await page.${emailSelector}.fill(requireEnv('E2E_USER_EMAIL'));
+  await page.${passwordSelector}.fill(requireEnv('E2E_USER_PASSWORD'));
   await page.${submitSelector}.click();
   await page.waitForURL(${waitUrl});
-${footer}`;
+  await expect(page.${emailSelector}).toBeHidden();
+}
+`;
 }
 
 // Named with a hyphen, not `global.setup.ts`, so the setup project's
@@ -395,7 +780,9 @@ export function ciReporters(pwVersion) {
 function ciReporterLine(pwVersion) {
   const kept = ciReporters(pwVersion).kept;
   if (kept.length === 0) return '';
-  return `\n    ...(process.env.CI ? [${kept.map((n) => `['${n}']`).join(', ')}] : []),`;
+  // `as const` keeps each entry a tuple, the type Playwright's reporter list
+  // takes, so the config passes `tsc --strict`.
+  return `\n    ...(process.env.CI ? ([${kept.map((n) => `['${n}']`).join(', ')}] as const) : []),`;
 }
 
 export function fullConfig(browsers, devices = [], resolutions = [], testIdAttribute = 'data-testid', pwVersion = null, location = WEB_DIR) {
@@ -422,6 +809,8 @@ export function fullConfig(browsers, devices = [], resolutions = [], testIdAttri
 
   return `import { existsSync, readFileSync } from 'node:fs';
 import { defineConfig, devices } from '@playwright/test';
+
+// ${AUTH_SETUP_MARKER} — safe to regenerate; edits here are overwritten.
 
 // Fill process.env from this package's .env, without overriding anything the
 // real environment already set — an exported var or a CI secret always wins.
@@ -458,7 +847,8 @@ export default defineConfig({
       ? {
           httpCredentials: {
             username: process.env.E2E_BASIC_AUTH_USER,
-            password: process.env.E2E_BASIC_AUTH_PASSWORD,
+            // httpCredentials takes a string, so an unset password is sent empty.
+            password: process.env.E2E_BASIC_AUTH_PASSWORD ?? '',
           },
         }
       : {}),
@@ -534,16 +924,22 @@ function walkSpecs(dir, depth, acc) {
   return acc;
 }
 
-// 'fresh' | 'conform'. Our own dir carries a manifest, so a re-run is fresh:
-// create-if-absent for structure, and create-or-regenerate for the config
-// (rewritten only when the projects changed; identical content still skips).
-// An e2e/web we did NOT create but that already holds specs is conform:
-// report, touch nothing unless --create-missing.
+// 'fresh' | 'conform'. A suite whose location has no Playwright config yet is
+// fresh: create-if-absent for structure, and create-or-regenerate for the
+// config (rewritten only when the projects changed; identical content still
+// skips). An e2e/web that already holds a Playwright config AND specs is
+// conform: report, touch nothing unless --create-missing.
 export function classify(targetPath, location) {
-  if (readRootManifest(targetPath)) return 'fresh';
   const webAbs = join(targetPath, location);
-  if (existsSync(join(webAbs, MANIFEST_NAME))) return 'fresh'; // legacy in-suite, pre-migration
-  if (existsSync(webAbs) && walkSpecs(webAbs, 4, []).length > 0) return 'conform';
+  // Conform means a real Playwright suite is already here, so leave it alone
+  // (touch nothing unless --create-missing). Any config filename Playwright
+  // loads counts — a suite configured in playwright.config.js is still a
+  // suite, and classifying it fresh would regenerate a second, conflicting
+  // playwright.config.ts beside it. The fresh path creates and owns the .ts
+  // config; the conform path writes nothing, so it does not depend on the
+  // filename.
+  const hasConfig = PLAYWRIGHT_CONFIG_NAMES.some((name) => existsSync(join(webAbs, name)));
+  if (hasConfig && existsSync(webAbs) && walkSpecs(webAbs, 4, []).length > 0) return 'conform';
   return 'fresh';
 }
 
@@ -613,52 +1009,20 @@ function writePackageJson(webAbs, location, pwVersion, created, skipped) {
 function wireConfig(webAbs, location, browsers, devices, resolutions, testIdAttribute, pwVersion, regenerate, created, skipped) {
   const rel = `${location}/playwright.config.ts`;
   const cfgPath = join(webAbs, 'playwright.config.ts');
-  const next = fullConfig(browsers, devices, resolutions, testIdAttribute, pwVersion, location);
-  if (existsSync(cfgPath)) {
-    const current = readFileSync(cfgPath, 'utf8');
-    if (current === next || !regenerate) return skipped.push(rel);
+  // On a dir we do not own, author nothing: an existing config is left as-is,
+  // and a foreign config (a .js/.mjs/.cjs, or a .ts we didn't write) gets no
+  // competing .ts created beside it that Playwright would load in its place.
+  if (!regenerate) {
+    const present = presentPlaywrightConfig(webAbs);
+    return skipped.push(present ? `${location}/${present.name}` : rel);
   }
+  const next = fullConfig(browsers, devices, resolutions, testIdAttribute, pwVersion, location);
+  if (existsSync(cfgPath) && readFileSync(cfgPath, 'utf8') === next) return skipped.push(rel);
   writeFileSync(cfgPath, next);
   created.push(rel);
 }
 
-// `ownsConfig` is the one durable record of whether THIS scaffolder authored
-// playwright.config.ts. Without it, the manifest a --create-missing run writes
-// over a hand-authored config makes the next run read the dir as owned and
-// regenerate that config wholesale. A manifest from before this key existed has
-// no hand-authored config behind it, so an absent key reads as owned.
-function writeManifest(targetPath, location, ownsConfig, authScheme, linter, typescript, created, skipped) {
-  const rel = MANIFEST_NAME; // repo root
-  const rootPath = join(targetPath, MANIFEST_NAME);
-  // Carry a spec-structure choice generate persisted, an auth scheme, a linter
-  // choice, and a TypeScript version override forward: scaffold rebuilds the
-  // manifest from scratch and would otherwise drop any of them, silently
-  // resetting the repo to undecided. Only a chosen (or previously stored)
-  // value is recorded — a bare scaffold call with no choice leaves the key
-  // absent and re-detects, mirroring pom/authScheme.
-  const existing = readRootManifest(targetPath);
-  const pom = manifestPom(existing);
-  const auth = resolveOverride(authScheme, manifestAuthScheme(existing), undefined);
-  const lint = resolveOverride(linter, manifestLinter(existing), undefined);
-  const ts = resolveOverride(typescript, manifestTypescript(existing), undefined);
-  const manifest = {
-    location,
-    dirs: { ...SCAFFOLD_DIRS },
-    storageState: STORAGE_STATE,
-    ownsConfig,
-    ...(pom !== undefined ? { pom } : {}),
-    ...(auth !== undefined ? { authScheme: auth } : {}),
-    ...(lint !== undefined ? { linter: lint } : {}),
-    ...(ts !== undefined ? { typescript: ts } : {}),
-  };
-  const existed = existsSync(rootPath);
-  writeFileSync(rootPath, JSON.stringify(manifest, null, 2) + '\n'); // idempotent refresh
-  (existed ? skipped : created).push(rel);
-  return rel;
-}
-
-// Everything the sub-package should contain, for the conform report. The
-// manifest now lives at the repo root, not inside the suite dir.
+// Everything the sub-package should contain, for the conform report.
 function structurePieces(location) {
   return [
     `${location}/package.json`,
@@ -667,13 +1031,13 @@ function structurePieces(location) {
     `${location}/pages`,
     `${location}/specs`,
     `${location}/fixtures/base.ts`,
+    `${location}/fixtures/login.ts`,
     `${location}/auth.setup.ts`,
     `${location}/${GLOBAL_SETUP_FILE}`,
     `${location}/.auth`,
     `${location}/.env.example`,
     `${location}/.env`,
     `${location}/.gitignore`,
-    MANIFEST_NAME,
   ];
 }
 
@@ -687,15 +1051,28 @@ function reportStructure(targetPath, location, resolvedLinter = 'none') {
   const hasOwnHook = globalSetupEntry(join(targetPath, location)).declared;
   const eslintRel = `${location}/eslint.config.mjs`;
   const hasEslintConfig = ESLINT_CONFIG_NAMES.some((name) => existsSync(join(targetPath, location, name)));
+  // The config piece is satisfied by any Playwright config name, not only .ts:
+  // a conform suite configured in .js holds a real config, so listing .ts as
+  // missing would report a complete suite as incomplete.
+  const configRel = `${location}/playwright.config.ts`;
+  const presentConfig = presentPlaywrightConfig(join(targetPath, location));
   // A Biome repo is never given an eslint config, so it is not a missing piece
   // there — drop it from the expected set rather than report a gap setup would
   // deliberately not fill.
   const pieces = resolvedLinter === 'biome' ? structurePieces(location).filter((rel) => rel !== eslintRel) : structurePieces(location);
+  // Only a TypeScript suite away from the repo root is expected to carry a
+  // tsconfig.json and a typecheck script, the two pieces applyTsconfig adds.
+  // The script is a piece of its own: a suite that already has a
+  // tsconfig.json can still lack it.
+  const typecheckRel = `${location}/package.json typecheck script`;
+  if (location !== '.' && suiteIsTypeScript(targetPath, location)) pieces.push(`${location}/tsconfig.json`, typecheckRel);
   for (const rel of pieces) {
     const satisfied =
       existsSync(join(targetPath, rel)) ||
       (rel === hookRel && hasOwnHook) ||
-      (rel === eslintRel && hasEslintConfig);
+      (rel === eslintRel && hasEslintConfig) ||
+      (rel === configRel && presentConfig !== null) ||
+      (rel === typecheckRel && hasTypecheckScript(join(targetPath, location)));
     (satisfied ? present : missing).push(rel);
   }
   // Reached only in conform mode (real specs, no manifest — see
@@ -703,8 +1080,9 @@ function reportStructure(targetPath, location, resolvedLinter = 'none') {
   // unconditionally hand-authored), which never calls applyStructure and so
   // never reaches the same check there. Without this, the single most common
   // case — scaffold() run with no --create-missing against an existing suite
-  // — got no smoke-split guidance at all.
-  noteUnsplitConfig(join(targetPath, location, 'playwright.config.ts'), location, notes);
+  // — got no smoke-split guidance at all. Named against the config actually
+  // present, not a .ts that a .js-configured suite never had.
+  if (presentConfig) noteUnsplitConfig(presentConfig.path, location, notes);
   return { present, missing, notes };
 }
 
@@ -725,14 +1103,15 @@ function applyEnvFile(targetPath, location, webServer, created, skipped) {
 // gate exists to prevent. The `//` strip keeps its leading whitespace so a URL
 // inside a string ('https://...') is not mistaken for a line comment.
 function globalSetupEntry(webAbs) {
-  const cfgPath = join(webAbs, 'playwright.config.ts');
-  if (!existsSync(cfgPath)) return { target: null, declared: false };
-  const source = readFileSync(cfgPath, 'utf8')
+  const present = presentPlaywrightConfig(webAbs);
+  if (!present) return { target: null, declared: false, configName: null };
+  const source = readFileSync(present.path, 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/(^|\s)\/\/[^\n]*/g, '$1');
   return {
     target: source.match(/globalSetup:\s*['"]([^'"]+)['"]/)?.[1] ?? null,
     declared: /globalSetup\s*:/.test(source),
+    configName: present.name,
   };
 }
 
@@ -740,15 +1119,16 @@ function globalSetupEntry(webAbs) {
 // wireConfig leaves a hand-authored config alone, so writing the hook there
 // would report a file Playwright never runs — say what's needed instead.
 function applyGlobalSetup(webAbs, location, created, skipped, notes) {
-  const { target, declared } = globalSetupEntry(webAbs);
+  const { target, declared, configName } = globalSetupEntry(webAbs);
   if (target === `./${GLOBAL_SETUP_FILE}` || target === GLOBAL_SETUP_FILE) {
     return writeIfAbsent(join(webAbs, GLOBAL_SETUP_FILE), `${location}/${GLOBAL_SETUP_FILE}`, GLOBAL_SETUP, created, skipped);
   }
+  const config = configName ?? 'playwright.config.ts';
   notes.push(
     declared
-      ? `${location}/playwright.config.ts already wires globalSetup to ${target ?? 'a hook of its own'}, so ${location}/${GLOBAL_SETUP_FILE} was not written — ` +
+      ? `${location}/${config} already wires globalSetup to ${target ?? 'a hook of its own'}, so ${location}/${GLOBAL_SETUP_FILE} was not written — ` +
           'seed and reset suite-wide test data in that hook instead.'
-      : `${location}/playwright.config.ts is hand-authored and has no globalSetup, so ${location}/${GLOBAL_SETUP_FILE} was not written — ` +
+      : `${location}/${config} is hand-authored and has no globalSetup, so ${location}/${GLOBAL_SETUP_FILE} was not written — ` +
           `add \`globalSetup: './${GLOBAL_SETUP_FILE}'\` to that config and re-run to get the hook.`,
   );
 }
@@ -758,17 +1138,46 @@ function applyGlobalSetup(webAbs, location, created, skipped, notes) {
 // follows the repo's linter instead of imposing ESLint on it. Detection reports
 // only eslint/biome/none, so this fires for Biome; a repo on a linter detection
 // does not recognise reads as `none` and gets ESLint unless the human overrides.
-// Said once here, the way noteUnsplitConfig surfaces a gap, since a skipped lint
-// setup is otherwise invisible. Biome has no eslint-plugin-playwright equivalent,
-// so the suite's specs simply go unlinted for the timing/await anti-patterns —
-// the honest trade for not wiring a second linter into the repo.
-function noteBiomeLinter(location, notes) {
-  notes.push(
-    `Biome is the repo's linter, so no ${location}/eslint.config.mjs, lint script, or ESLint ` +
-      "dependencies were added — the e2e suite follows the repo's linter rather than imposing ESLint. " +
-      'Biome has no eslint-plugin-playwright equivalent, so the specs are not linted for the ' +
-      'Playwright timing/await anti-patterns the ESLint config would otherwise catch.',
-  );
+//
+// The suite gets Biome's Playwright rules instead, in a nested biome.json beside
+// the assertion plugin, when the repo's Biome reaches BIOME_PLAYWRIGHT_MIN. Below
+// it, or with no version to read, nothing is written and a note says why, since
+// a skipped lint setup is otherwise invisible. An existing suite Biome config is
+// left as it is, with a note naming the rules to add, unless it is ours.
+function applyBiomeConfig(webAbs, location, biomeVersion, created, skipped, notes) {
+  const missed = 'so the specs are not linted for waitForTimeout, a missing await, networkidle or a missing assertion';
+  if (!reachesBiomePlaywrightMin(biomeVersion)) {
+    notes.push(
+      biomeVersion
+        ? `Biome is the repo's linter, and its @biomejs/biome version (${biomeVersion}) does not reach ${BIOME_PLAYWRIGHT_MIN}, ` +
+            `the first release with Playwright lint rules. No ${location}/biome.json or lint script was added, ${missed}. ` +
+            `Upgrade @biomejs/biome to ${BIOME_PLAYWRIGHT_MIN} or later and re-run setup to add them.`
+        : `Biome is the repo's linter, but the repo root has no @biomejs/biome version installed or declared. ` +
+            `No ${location}/biome.json or lint script was added, ${missed}. ` +
+            `Add @biomejs/biome ${BIOME_PLAYWRIGHT_MIN} or later as a root devDependency and re-run setup to add them.`,
+    );
+    return false;
+  }
+  const present = BIOME_CONFIG_NAMES.find((name) => existsSync(join(webAbs, name)));
+  if (present) {
+    const rel = `${location}/${present}`;
+    skipped.push(rel);
+    if (readFileSync(join(webAbs, present), 'utf8') === BIOME_CONFIG) {
+      writeIfAbsent(join(webAbs, BIOME_PLUGIN_FILE), `${location}/${BIOME_PLUGIN_FILE}`, BIOME_ASSERTION_PLUGIN, created, skipped);
+    } else {
+      notes.push(
+        `${rel} already exists, so it was left as it is and no Playwright rules were added to it. ` +
+          'To lint the specs for the Playwright anti-patterns, enable noPlaywrightWaitForTimeout, ' +
+          'noPlaywrightMissingAwait and noPlaywrightNetworkidle under linter.rules.nursery.',
+      );
+    }
+    return true;
+  }
+  mkdirSync(webAbs, { recursive: true });
+  writeFileSync(join(webAbs, 'biome.json'), BIOME_CONFIG);
+  created.push(`${location}/biome.json`);
+  writeIfAbsent(join(webAbs, BIOME_PLUGIN_FILE), `${location}/${BIOME_PLUGIN_FILE}`, BIOME_ASSERTION_PLUGIN, created, skipped);
+  return true;
 }
 
 // Write our eslint.config.mjs only when the sub-package has no eslint config of
@@ -782,21 +1191,57 @@ function applyEslintConfig(webAbs, location, created, skipped) {
   created.push(rel);
 }
 
-// Add `lint: eslint .` only when a flat config is present after applyEslintConfig
-// ran — ours just written, or one already there. A sub-package left on a legacy
-// .eslintrc gets no lint script, since `eslint .` under ESLint 9 would fail on it.
-function applyLintScript(webAbs, location, created, skipped) {
+// Add the lint script, `eslint .` unless the caller passes Biome's, when the
+// suite has no `lint` script yet. The caller gates on the config: ESLint's only
+// when a flat config is present after applyEslintConfig ran, ours just written
+// or one already there. A sub-package left on a legacy .eslintrc gets no lint
+// script, since `eslint .` under ESLint 9 would fail on it.
+function applyLintScript(webAbs, location, created, skipped, script = LINT_SCRIPT) {
   const rel = `${location}/package.json`;
-  if (!hasFlatEslintConfig(webAbs)) return;
   const pkgPath = join(webAbs, 'package.json');
   const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
   pkg.scripts = pkg.scripts ?? {};
   if ('lint' in pkg.scripts) return;
-  pkg.scripts = { ...pkg.scripts, ...LINT_SCRIPT };
+  pkg.scripts = { ...pkg.scripts, ...script };
   writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
   // This write changed package.json. writePackageJson may already have parked it
   // in `skipped` (nothing else to change); move it to `created` so the report
   // does not claim the file is unchanged when the lint script was just added.
+  const at = skipped.indexOf(rel);
+  if (at !== -1) skipped.splice(at, 1);
+  if (!created.includes(rel)) created.push(rel);
+}
+
+// The suite's language, read after the config is wired: a fresh scaffold's
+// playwright.config.ts makes it TypeScript, and a suite of .spec.js files or a
+// hand-authored playwright.config.js keeps it JavaScript.
+function suiteIsTypeScript(targetPath, location) {
+  return detect(targetPath, { location }).language === 'ts';
+}
+
+// A TypeScript suite gets a tsconfig.json of its own and a typecheck script.
+// An existing suite tsconfig.json is left as it is, and so is an existing
+// typecheck script. A JavaScript suite gets neither. A suite at the repo root
+// gets neither too: its tsconfig.json and package.json are the app's, so a
+// typecheck there would check the app.
+function applyTsconfig(targetPath, webAbs, location, created, skipped, notes) {
+  if (!suiteIsTypeScript(targetPath, location)) return;
+  if (location === '.') {
+    notes.push(
+      'The suite is the repo root, so no tsconfig.json or typecheck script was written for it — ' +
+        "the root's are the app's, and a typecheck there would check the app. Move the suite to its own directory to get both.",
+    );
+    return;
+  }
+  const rootConfig = ROOT_TSCONFIG_NAMES.find((name) => existsSync(join(targetPath, name)));
+  writeIfAbsent(join(webAbs, 'tsconfig.json'), `${location}/tsconfig.json`, renderTsconfig(rootConfig, location), created, skipped);
+  const rel = `${location}/package.json`;
+  const pkgPath = join(webAbs, 'package.json');
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+  pkg.scripts = pkg.scripts ?? {};
+  if ('typecheck' in pkg.scripts) return;
+  pkg.scripts = { ...pkg.scripts, ...TYPECHECK_SCRIPT };
+  writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
   const at = skipped.indexOf(rel);
   if (at !== -1) skipped.splice(at, 1);
   if (!created.includes(rel)) created.push(rel);
@@ -872,7 +1317,7 @@ export function hasSmokeSplit(source) {
 function noteUnsplitConfig(cfgPath, location, notes) {
   if (!existsSync(cfgPath) || hasSmokeSplit(readFileSync(cfgPath, 'utf8'))) return;
   notes.push(
-    `${location}/playwright.config.ts is hand-authored and has no smoke/granular project split — ` +
+    `${location}/${basename(cfgPath)} is hand-authored and has no smoke/granular project split — ` +
       `add a '-smoke' project per browser with testMatch: ${SMOKE_SPEC_PATTERN} and testIgnore: ${SMOKE_SPEC_PATTERN} ` +
       'on its granular counterpart, or scaffold a fresh e2e/web to get one generated.',
   );
@@ -896,6 +1341,14 @@ function noteDroppedReporters(pwVersion, notes) {
     `${cause}; omitted from the CI config so it loads instead of throwing 'Unknown reporter'. ` +
       'Pin @playwright/test to 1.37+ to get them back.',
   );
+}
+
+function hasTypecheckScript(webAbs) {
+  try {
+    return Boolean(JSON.parse(readFileSync(join(webAbs, 'package.json'), 'utf8')).scripts?.typecheck);
+  } catch {
+    return false;
+  }
 }
 
 // True only when e2e/web/package.json actually defines a test:e2e script, so
@@ -942,67 +1395,81 @@ function noteTaskRunner(targetPath, report, pm, notes, location) {
   );
 }
 
+// fixtures/base.ts imports { login } from ./login. A fixtures/login.ts the
+// suite already had, without that export, would make a fresh base.ts fail to
+// load, so base.ts is left unwritten and the note says what to add.
+const LOGIN_DECLARATION = /export\s+(async\s+)?function\s+login\b|export\s+(const|let|var)\s+login\b/;
+
+// True when the source exports the name `login`: a declaration, or an export
+// list entry whose exported name is login (`login`, `signIn as login`). An
+// entry that renames login away (`login as default`) does not count.
+function exportsLogin(source) {
+  if (LOGIN_DECLARATION.test(source)) return true;
+  for (const [, list] of source.matchAll(/export\s*\{([^}]*)\}/g)) {
+    for (const entry of list.split(',')) {
+      const words = entry.trim().split(/\s+/);
+      if (words.at(-1) === 'login') return true;
+    }
+  }
+  return false;
+}
+
+function applyFixturesBase(webAbs, location, created, skipped, notes) {
+  const loginPath = join(webAbs, 'fixtures/login.ts');
+  if (!existsSync(join(webAbs, 'fixtures/base.ts')) && existsSync(loginPath) && !exportsLogin(readFileSync(loginPath, 'utf8'))) {
+    notes.push(
+      `${location}/fixtures/login.ts exists and exports no \`login\`, so ${location}/fixtures/base.ts was not written — ` +
+        'the generated base fixture imports { login } from it. Export `async function login(page)` from that file, or move it aside, and re-run.',
+    );
+    return;
+  }
+  writeIfAbsent(join(webAbs, 'fixtures/base.ts'), `${location}/fixtures/base.ts`, FIXTURES_BASE, created, skipped);
+}
+
 // Create everything under the suite location (create-if-absent, never clobbering).
-function applyStructure(targetPath, webAbs, location, webServer, browsers, devices, resolutions, testIdAttribute, pwVersion, ownsConfig, authScheme, resolvedLinter, linterOption, typescriptOption, pm, created, skipped, notes) {
+function applyStructure(targetPath, webAbs, location, webServer, browsers, devices, resolutions, testIdAttribute, pwVersion, ownsConfig, resolvedLinter, biomeVersion, pm, created, skipped, notes) {
   writePackageJson(webAbs, location, pwVersion, created, skipped);
   wireConfig(webAbs, location, browsers, devices, resolutions, testIdAttribute, pwVersion, ownsConfig, created, skipped);
-  if (!ownsConfig) noteUnsplitConfig(join(webAbs, 'playwright.config.ts'), location, notes);
-  else noteDroppedReporters(pwVersion, notes);
+  if (!ownsConfig) {
+    const present = presentPlaywrightConfig(webAbs);
+    if (present) noteUnsplitConfig(present.path, location, notes);
+  } else noteDroppedReporters(pwVersion, notes);
   // ESLint stack only when the repo lints with ESLint or has no recognised
-  // linter; a Biome repo is left to its own linter, with a note.
+  // linter; a Biome repo gets Biome's Playwright rules where its Biome has them.
   if (resolvedLinter === 'biome') {
-    noteBiomeLinter(location, notes);
+    if (applyBiomeConfig(webAbs, location, biomeVersion, created, skipped, notes)) {
+      applyLintScript(webAbs, location, created, skipped, BIOME_LINT_SCRIPT);
+    }
   } else {
     applyEslintConfig(webAbs, location, created, skipped);
-    applyLintScript(webAbs, location, created, skipped);
+    if (hasFlatEslintConfig(webAbs)) applyLintScript(webAbs, location, created, skipped);
   }
   applyDynamicScripts(webAbs, location, browsers, devices, resolutions, ownsConfig, created, skipped);
+  applyTsconfig(targetPath, webAbs, location, created, skipped, notes);
   ensureDir(join(webAbs, 'pages'), `${location}/pages`, created, skipped);
   ensureDir(join(webAbs, 'specs'), `${location}/specs`, created, skipped);
   ensureDir(join(webAbs, '.auth'), `${location}/.auth`, created, skipped);
-  writeIfAbsent(join(webAbs, 'fixtures/base.ts'), `${location}/fixtures/base.ts`, FIXTURES_BASE, created, skipped);
+  applyFixturesBase(webAbs, location, created, skipped, notes);
+  writeIfAbsent(join(webAbs, 'fixtures/login.ts'), `${location}/fixtures/login.ts`, renderLogin(), created, skipped);
   writeIfAbsent(join(webAbs, 'auth.setup.ts'), `${location}/auth.setup.ts`, renderAuthSetup(), created, skipped);
   writeIfAbsent(join(webAbs, 'codegen.mjs'), `${location}/codegen.mjs`, CODEGEN_WRAPPER, created, skipped);
   applyGlobalSetup(webAbs, location, created, skipped, notes);
   appendLinesIfAbsent(join(webAbs, '.env.example'), `${location}/.env.example`, ENV_VARS.map((n) => `${n}=`), created, skipped);
   appendLinesIfAbsent(join(webAbs, '.gitignore'), `${location}/.gitignore`, gitignoreEntriesFor(pm), created, skipped);
-  writeManifest(targetPath, location, ownsConfig, authScheme, linterOption, typescriptOption, created, skipped);
   return applyEnvFile(targetPath, location, webServer, created, skipped);
 }
 
-// Absorb a legacy in-suite manifest (one written before the store moved to the
-// repo root, including one carried along when a suite dir was hand-relocated)
-// into a root manifest, then remove it. No-op when a root manifest already
-// exists or there is no in-suite manifest. Returns the migrated object or null.
-function migrateInSuiteManifest(targetPath, location) {
-  if (readRootManifest(targetPath)) return null;
-  const inSuitePath = join(targetPath, location, MANIFEST_NAME);
-  if (!existsSync(inSuitePath)) return null;
-  let legacy;
-  try { legacy = JSON.parse(readFileSync(inSuitePath, 'utf8')); } catch { return null; }
-  // A parseable-but-non-object legacy manifest (`null`, an array, a bare
-  // primitive) is malformed the same way bad JSON is — treat it as absent
-  // rather than dereferencing `.dirs` on it below.
-  if (legacy === null || typeof legacy !== 'object' || Array.isArray(legacy)) return null;
-  const migrated = {
-    location,
-    dirs: legacy.dirs ? { ...legacy.dirs } : { ...SCAFFOLD_DIRS },
-    storageState: legacy.storageState ?? STORAGE_STATE,
-    ownsConfig: legacy.ownsConfig !== false,
-    ...(legacy.pom !== undefined ? { pom: legacy.pom } : {}),
-    ...(legacy.authScheme !== undefined ? { authScheme: legacy.authScheme } : {}),
-    ...(legacy.linter !== undefined ? { linter: legacy.linter } : {}),
-  };
-  writeFileSync(join(targetPath, MANIFEST_NAME), JSON.stringify(migrated, null, 2) + '\n');
-  rmSync(inSuitePath);
-  return migrated;
-}
-
 export function scaffold(targetPath, options = {}) {
-  const { browsers = ['chromium'], devices = [], resolutions = [], createMissing = false, authScheme, linter, typescript } = options;
+  const { browsers = ['chromium'], devices = [], resolutions = [], createMissing = false, linter } = options;
+  // Playwright runs three desktop engines. An unknown key would otherwise
+  // produce no project and no error, so it stops the run before any write.
+  const unknown = browsers.filter((browser) => !Object.hasOwn(BROWSER_PRESETS, browser));
+  if (unknown.length) {
+    const valid = Object.keys(BROWSER_PRESETS).join(', ');
+    return { status: 'error', message: `Unknown desktop browser key: ${unknown.join(', ')}. Valid keys: ${valid}. Opera and other Chromium-based browsers share the Chromium engine: pick chromium, which runs Playwright's Chromium build, not the branded browser.` };
+  }
   const location = resolveLocation(targetPath, options);
   const webAbs = join(targetPath, location);
-  migrateInSuiteManifest(targetPath, location);
   const pwVersion = detectPlaywrightVersion(targetPath, location);
   const mode = classify(targetPath, location);
 
@@ -1016,12 +1483,10 @@ export function scaffold(targetPath, options = {}) {
   const report = detect(targetPath);
   const pm = options.packageManager ?? resolvePackageManager(report);
 
-  // The linter to follow: an explicit choice wins, then a value persisted by an
-  // earlier run (or migrated from a legacy in-suite manifest above), then the
-  // repo's detected linter. Drives which lint stack applyStructure writes and
-  // what the conform report expects; only the explicit-or-persisted `linter` is
-  // recorded (see writeManifest).
-  const resolvedLinter = resolveOverride(linter, manifestLinter(readRootManifest(targetPath)), resolveLinter(report));
+  // The linter to follow: an explicit choice wins, else the repo's detected
+  // linter. Drives which lint stack applyStructure writes and what the conform
+  // report expects.
+  const resolvedLinter = resolveOverride(linter, resolveLinter(report));
 
   if (mode === 'conform' && !createMissing) {
     const structure = reportStructure(targetPath, location, resolvedLinter);
@@ -1034,29 +1499,18 @@ export function scaffold(targetPath, options = {}) {
 
   // Regenerate the config only on a dir THIS scaffolder owns. classify() also
   // calls a spec-less, human-authored suite 'fresh', so keying on mode would
-  // silently clobber a hand-written config; ownership is the correct gate. The
-  // root manifest records the answer; a legacy in-suite manifest is honoured
-  // during the migration window; on the first run over a dir that already holds
-  // a config with no manifest at all, that config is somebody else's.
-  const rootManifest = readRootManifest(targetPath);
-  const legacy = rootManifest
-    ? null
-    : (() => {
-        try {
-          return JSON.parse(readFileSync(join(webAbs, MANIFEST_NAME), 'utf8'));
-        } catch {
-          return null;
-        }
-      })();
-  const ownershipManifest = rootManifest ?? legacy;
-  const owned = ownershipManifest
-    ? ownershipManifest.ownsConfig !== false
-    : !existsSync(join(webAbs, 'playwright.config.ts'));
+  // silently clobber (or write a competing .ts beside) a hand-written config;
+  // ownership is the correct gate. No manifest records the answer — a suite is
+  // ours only when its lone config is our own playwright.config.ts carrying the
+  // regeneratable marker OR the legacy .env-loader signal every fullConfig
+  // render has emitted; a config of any other name, or a .ts with neither
+  // signal, reads as unowned (ownsConfigAt).
+  const owned = ownsConfigAt(webAbs);
 
   const created = [];
   const skipped = [];
   const notes = [];
-  const env = applyStructure(targetPath, webAbs, location, webServer, browsers, devices, resolutions, testIdAttribute, pwVersion, owned, authScheme, resolvedLinter, linter, typescript, pm, created, skipped, notes);
+  const env = applyStructure(targetPath, webAbs, location, webServer, browsers, devices, resolutions, testIdAttribute, pwVersion, owned, resolvedLinter, resolveBiome(report), pm, created, skipped, notes);
   noteTaskRunner(targetPath, report, pm, notes, location);
 
   const status = mode === 'conform' ? 'conformed' : 'scaffolded';
@@ -1077,8 +1531,9 @@ if (isMainModule) {
   const resolutions = resolutionsArg ? resolutionsArg.split(',').map((r) => r.trim()).filter(Boolean) : [];
   const createMissing = process.argv.includes('--create-missing');
   const location = flag('--location');
-  const authScheme = flag('--auth');
   const linter = flag('--linter');
   const typescript = flag('--typescript');
-  console.log(JSON.stringify(scaffold(targetPath, { browsers, devices, resolutions, createMissing, location, authScheme, linter, typescript }), null, 2));
+  const result = scaffold(targetPath, { browsers, devices, resolutions, createMissing, location, linter, typescript });
+  console.log(JSON.stringify(result, null, 2));
+  if (result.status === 'error') process.exitCode = 1;
 }

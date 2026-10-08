@@ -97,6 +97,67 @@ function collectCodexServers(servers, meta, out) {
   collectFromServers(active, meta, out);
 }
 
+// A .mcp.json server needs approval (enabledMcpjsonServers /
+// enableAllProjectMcpServers) before Claude Code will run it, and that approval is
+// recorded in the SETTINGS files: answering the prompt writes the project's
+// .claude/settings.local.json, a committed .claude/settings.json carries a team-wide
+// one, and ~/.claude/settings.json carries a per-person one. ~/.claude.json holds
+// `enabledMcpjsonServers: []` on every project it has ever seen, so reading that key
+// alone denies every server.
+//
+// Claude Code unions the lists across those files rather than letting the
+// higher-precedence one replace the lower. Measured against `claude mcp list`: an
+// approval in .claude/settings.json survives an empty array in
+// .claude/settings.local.json, and a name in disabledMcpjsonServers drops the server
+// whichever file approved it.
+//
+// So an empty list is "nothing recorded", and where no file records anything the
+// caller falls back to disabled-list-only filtering rather than reporting every
+// server as denied.
+//
+// enableAllProjectMcpServers is a boolean and follows ordinary settings precedence
+// instead, so the highest-precedence file that sets it wins and the sources below
+// are ordered lowest first. Measured: `true` in .claude/settings.json approves both
+// servers in a .mcp.json, and adding `false` to .claude/settings.local.json puts
+// them back to pending. An explicit `false` is therefore recorded state, not a
+// missing value, and it denies everything the enabled lists do not name. It does
+// not touch those names: `false` beside `enabledMcpjsonServers: ["alpha"]` in one
+// file leaves alpha approved.
+//
+// Not read: enterprise managed settings (three OS-dependent paths), and the project
+// entry's hasTrustDialogAccepted, which gates whether Claude Code honours a repo's
+// settings at all. A repo nobody has opened in `claude` yet reports its approvals
+// as live.
+//
+// Exported because detectMcp returns Playwright servers only, so confirming the
+// result against a real approved server of any other name goes through here.
+export function resolveMcpjsonApproval(
+  root,
+  homeDir = homedir(),
+  projectEntry = readJson(join(homeDir, '.claude.json'))?.projects?.[root],
+) {
+  const sources = [
+    projectEntry,
+    readJson(join(homeDir, '.claude', 'settings.json')),
+    readJson(join(root, '.claude', 'settings.json')),
+    readJson(join(root, '.claude', 'settings.local.json')),
+  ];
+  const enabled = new Set();
+  const disabled = new Set();
+  let enableAll; // undefined until a file sets it; the last one to do so wins
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    if (Array.isArray(source.enabledMcpjsonServers)) source.enabledMcpjsonServers.forEach((name) => enabled.add(name));
+    if (Array.isArray(source.disabledMcpjsonServers)) source.disabledMcpjsonServers.forEach((name) => disabled.add(name));
+    if (typeof source.enableAllProjectMcpServers === 'boolean') enableAll = source.enableAllProjectMcpServers;
+  }
+  const recorded = enableAll !== undefined || enabled.size > 0;
+  return {
+    approve: recorded ? (name) => enableAll === true || enabled.has(name) : null,
+    disabled: [...disabled],
+  };
+}
+
 export function detectMcp(targetPath, homeDir = homedir()) {
   const found = [];
   // Claude Code keys ~/.claude.json's `projects` map by the absolute cwd
@@ -113,20 +174,13 @@ export function detectMcp(targetPath, homeDir = homedir()) {
   // mcpServers (disabledMcpServers) — do not conflate the two.
   const claudeProject = join(root, '.mcp.json');
   const claudeProjectEntry = claudeHome?.projects?.[root];
-  // .mcp.json servers also need approval (enabledMcpjsonServers / enableAllProjectMcpServers)
-  // before Claude Code will run them. That allowlist is authoritative only when actually
-  // configured; when neither is set, fall back to disabled-list-only filtering so we don't
-  // false-negative repos with no approval state recorded at all.
-  const hasMcpjsonAllowlist = Array.isArray(claudeProjectEntry?.enabledMcpjsonServers) || claudeProjectEntry?.enableAllProjectMcpServers !== undefined;
-  const approveMcpjsonServer = hasMcpjsonAllowlist
-    ? (name) => claudeProjectEntry.enableAllProjectMcpServers === true || (claudeProjectEntry.enabledMcpjsonServers ?? []).includes(name)
-    : null;
+  const mcpjson = resolveMcpjsonApproval(root, homeDir, claudeProjectEntry);
   collectFromServers(
     readJson(claudeProject)?.mcpServers,
     { harness: 'claude-code', file: claudeProject, scope: 'project' },
     found,
-    claudeProjectEntry?.disabledMcpjsonServers ?? [],
-    approveMcpjsonServer,
+    mcpjson.disabled,
+    mcpjson.approve,
   );
 
   collectFromServers(claudeHome?.mcpServers, { harness: 'claude-code', file: claudeHomePath, scope: 'user' }, found, claudeHome?.disabledMcpServers ?? []);

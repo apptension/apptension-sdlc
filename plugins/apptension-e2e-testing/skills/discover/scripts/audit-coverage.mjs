@@ -44,8 +44,12 @@ const isMainModule = process.argv[1] && realpathSync(process.argv[1]) === fileUR
 if (isMainModule) {
   const targetPath = process.argv[2] ?? '.';
   const args = process.argv.slice(3);
-  const specDirIndex = args.indexOf('--spec-dir');
-  const specDir = specDirIndex !== -1 ? args[specDirIndex + 1] : undefined;
+  const flag = (name) => {
+    const i = args.indexOf(name);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+  const specDir = flag('--spec-dir');
+  const location = flag('--location');
 
   const handleError = (err) => {
     console.log(JSON.stringify({ status: 'error', message: err.message }, null, 2));
@@ -57,7 +61,7 @@ if (isMainModule) {
   process.stdin.on('end', () => {
     try {
       const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      console.log(JSON.stringify(auditCoverage(targetPath, payload, { specDir }), null, 2));
+      console.log(JSON.stringify(auditCoverage(targetPath, payload, { specDir, location }), null, 2));
     } catch (err) {
       handleError(err);
     }

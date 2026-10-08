@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readRootManifest, resolveLocation } from './manifest.mjs';
+import { resolveLocation, assertSafeLocation } from './manifest.mjs';
 
 const LOCKFILE_MANAGERS = {
   'package-lock.json': 'npm',
@@ -11,7 +11,7 @@ const LOCKFILE_MANAGERS = {
   'bun.lock': 'bun',
 };
 
-const PLAYWRIGHT_CONFIG_NAMES = [
+export const PLAYWRIGHT_CONFIG_NAMES = [
   'playwright.config.ts',
   'playwright.config.js',
   'playwright.config.mjs',
@@ -104,11 +104,10 @@ function detectSuiteSpecExtension(suiteDir) {
 // share the root's language. The package dir comes from resolveLocation
 // (persisted answer, else e2e/web), never a hardcoded path.
 //
-// A local tsconfig.json is decisive where present. Otherwise fall back to
-// what the suite's own specs are already written in: scaffold.mjs never
-// writes a tsconfig.json into the package it creates, TS or JS, so an
-// already-scaffolded TS suite has no local tsconfig.json to find, and its
-// existing specs are the only local signal of its language.
+// A local tsconfig.json is decisive where present. scaffold.mjs writes one
+// into a TypeScript suite, but a suite scaffolded before it did, or
+// configured by hand, may have none. Otherwise fall back to what the suite's
+// own specs are already written in.
 //
 // options.specDir is write-specs.mjs's already-resolved write target —
 // which can diverge from resolveLocation's guess (an explicit --spec-dir,
@@ -117,11 +116,18 @@ function detectSuiteSpecExtension(suiteDir) {
 // only after the resolveLocation-based suiteDir comes up empty, so an
 // onboarded suite's own answer still wins.
 //
-// The root tsconfig.json check applies only once every local signal is
-// empty — no local tsconfig.json and no specs written anywhere yet, e.g.
-// scaffold's first run, which calls detect() before the package exists.
+// A suite with no specs yet falls back to its own Playwright config's
+// extension: a fresh scaffold has no specs, and its playwright.config.ts is
+// the local signal scaffold.mjs reads to decide whether to write the suite's
+// tsconfig.json (#614). Specs win over the config, because a TS suite can keep
+// playwright.config.js.
+//
+// The root check applies only once every local signal is empty — no local
+// tsconfig.json, no specs and no suite config, e.g. scaffold's first run,
+// which calls detect() before the package exists. A root tsconfig.base.json
+// counts the same as a tsconfig.json: an Nx repo keeps only the former.
 function detectLanguage(repoRoot, options = {}) {
-  const suiteDir = join(repoRoot, resolveLocation(repoRoot, {}));
+  const suiteDir = join(repoRoot, resolveLocation(repoRoot, options));
   if (existsSync(join(suiteDir, 'tsconfig.json'))) return 'ts';
   const specExtension = detectSuiteSpecExtension(suiteDir);
   if (specExtension) return specExtension;
@@ -129,7 +135,9 @@ function detectLanguage(repoRoot, options = {}) {
     const specDirExtension = detectSuiteSpecExtension(join(repoRoot, options.specDir));
     if (specDirExtension) return specDirExtension;
   }
-  return existsSync(join(repoRoot, 'tsconfig.json')) ? 'ts' : 'js';
+  const suiteConfig = PLAYWRIGHT_CONFIG_NAMES.find((name) => existsSync(join(suiteDir, name)));
+  if (suiteConfig) return suiteConfig.endsWith('.ts') ? 'ts' : 'js';
+  return ['tsconfig.json', 'tsconfig.base.json'].some((name) => existsSync(join(repoRoot, name))) ? 'ts' : 'js';
 }
 
 // The repo's declared TypeScript version, read from the ROOT package.json only
@@ -145,11 +153,36 @@ function detectTypeScript(repoRoot) {
   return pkg.dependencies?.typescript ?? pkg.devDependencies?.typescript ?? null;
 }
 
+// The repo's declared @types/node version, read from the ROOT package.json only
+// — the same scope as detectTypeScript — or null when the repo declares none.
+// install-playwright.mjs pins a TypeScript suite's own `@types/node` to this,
+// because a workspace package gets no types from the root and the scaffolded
+// fixtures/base.ts reads `node:fs` and `process.env`.
+function detectTypesNode(repoRoot) {
+  const pkg = readPackageJson(repoRoot);
+  return pkg.dependencies?.['@types/node'] ?? pkg.devDependencies?.['@types/node'] ?? null;
+}
+
 // Resolve the TypeScript version to pin, from a detect() report. Falls back to
 // null (no pin — let the install step add current) when detection found
 // nothing, mirroring resolveTestIdAttribute's null-handling.
 export function resolveTypescript(report) {
   return report.typescript ?? null;
+}
+
+// The repo's declared ESLint version, read from the ROOT package.json only —
+// the same scope as detectTypeScript — or null when the repo declares none.
+// install-playwright.mjs pins e2e/web's own `eslint` to this, so the suite lints
+// on the repo's ESLint major instead of whatever is latest (#613).
+function detectEslint(repoRoot) {
+  const pkg = readPackageJson(repoRoot);
+  return pkg.dependencies?.eslint ?? pkg.devDependencies?.eslint ?? null;
+}
+
+// Resolve the ESLint version to pin, from a detect() report. Null when
+// detection found nothing; install-playwright then picks its own default.
+export function resolveEslint(report) {
+  return report.eslint ?? null;
 }
 
 function detectPinningStyle(pkg) {
@@ -166,12 +199,60 @@ function detectPinningStyle(pkg) {
   return Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
 }
 
-function detectPlaywright(dir) {
+// Yarn Plug'n'Play resolves dependencies through a .pnp.* loader and writes no
+// node_modules, so it counts as installed on its own, mirroring resolve-app-url's
+// dependency probe.
+const PNP_MARKERS = ['.pnp.cjs', '.pnp.js', '.pnp.loader.mjs'];
+
+// `installed` reads package.json's declared dependency, so it is true wherever
+// the scaffold is committed. `dependenciesInstalled` reads the on-disk install,
+// which every worktree provides for itself and the suite gitignores — so it is
+// false in a fresh worktree that has the committed config but no install yet.
+// resolveLocation uses the split to tell "scaffold this suite" from "install
+// this worktree".
+//
+// True when the suite pins its own node-modules linker, which is what
+// install-playwright writes into every Yarn suite (`.yarnrc.yml:
+// nodeLinker: node-modules`) so specs resolve from a real node_modules. Such a
+// suite installs into its own dir even as a workspace member, so a root PnP
+// loader never resolves it — its install has to be suite-local.
+function forcesNodeModulesLinker(dir) {
+  const yarnrc = join(dir, '.yarnrc.yml');
+  if (!existsSync(yarnrc)) return false;
+  try {
+    // YAML allows a quoted scalar, so accept `node-modules`, `'node-modules'`,
+    // and `"node-modules"` alike.
+    return /nodeLinker:\s*["']?node-modules["']?/.test(readFileSync(yarnrc, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+// A suite-local marker — its own node_modules/@playwright/test or a PnP loader
+// in the suite dir — always proves the install. A root marker resolves a nested
+// suite only when that suite is a real workspace member, because a workspace's
+// install hoists members into the root (node_modules) or resolves them through
+// the root loader (PnP). e2e-setup makes the default suite a standalone package
+// (its own yarn.lock, a node-modules linker), which is not a member, so a root
+// install belongs to the app and never resolves it. So the root fallbacks apply
+// to the root location itself, where app and suite coincide, and to a nested
+// member: a node_modules hoist under a hoisting manager (the same
+// `packageManager !== 'pnpm'` guard resolve-app-url's probe uses), or a root PnP
+// loader — but only when the member has not pinned its own node-modules linker,
+// which forces a suite-local install the root loader cannot stand in for.
+function detectPlaywright(dir, targetPath = dir, packageManager = null, isMember = false) {
   const pkg = readPackageJson(dir);
   const version = pkg.dependencies?.['@playwright/test'] ?? pkg.devDependencies?.['@playwright/test'];
   const configPath = PLAYWRIGHT_CONFIG_NAMES.map((name) => join(dir, name)).find(existsSync) ?? null;
   if (!version && !configPath) return null;
-  return { installed: Boolean(version), version: version ?? null, configPath };
+  const playwrightPackage = join('node_modules', '@playwright', 'test', 'package.json');
+  const installedAt = (base) =>
+    existsSync(join(base, playwrightPackage)) || PNP_MARKERS.some((marker) => existsSync(join(base, marker)));
+  const rootHoistsThisSuite = dir === targetPath || isMember;
+  const rootPnpResolvesSuite = !forcesNodeModulesLinker(dir) && PNP_MARKERS.some((marker) => existsSync(join(targetPath, marker)));
+  const rootInstall = (packageManager !== 'pnpm' && existsSync(join(targetPath, playwrightPackage))) || rootPnpResolvesSuite;
+  const dependenciesInstalled = installedAt(dir) || (rootHoistsThisSuite && rootInstall);
+  return { installed: Boolean(version), version: version ?? null, configPath, dependenciesInstalled };
 }
 
 function detectStartCommand(pkg) {
@@ -343,8 +424,25 @@ function angularJsonPort(appDir, projectName, configName) {
 // A dev-server port pinned in the framework config file, or null. Static and
 // deterministic, so deriveBaseUrl persists it like a declared value; keyed on
 // the framework dependency, mirroring frameworkPort/consumesPort above.
-function detectConfigPort(appDir, deps, script) {
-  if (deps.includes('vite') || deps.includes('@sveltejs/kit')) {
+//
+// A location that declares another dev-server framework, such as Next, keeps
+// that framework's port: its vite.config.* is usually Vitest's, and its
+// server.port is not the port `next dev` binds. A monorepo often declares
+// `vite` at the workspace root only, so a root `vite` counts for a location
+// whose start script runs `vite` or hands off to a task runner that may, and
+// that declares no Remix package. Classic Remix does not serve through Vite,
+// and a task runner hides which server it starts, so a Remix app on a root-only
+// `vite` gets no config port rather than its Vitest config's.
+const VITE_OR_TASK_RUNNER = /\b(?:vite|nx|turbo)\b/;
+
+function detectConfigPort(appDir, deps, script, rootDeps = []) {
+  const otherFramework = FRAMEWORK_PORTS.some(
+    ([dep]) => dep !== 'vite' && dep !== '@sveltejs/kit' && deps.includes(dep),
+  );
+  const remix = deps.some((dep) => dep.startsWith('@remix-run/'));
+  const rootVite = rootDeps.includes('vite') && !remix && Boolean(script) && VITE_OR_TASK_RUNNER.test(script);
+  const servedByVite = !otherFramework && (deps.includes('vite') || deps.includes('@sveltejs/kit') || rootVite);
+  if (servedByVite) {
     const port = viteConfigPort(appDir);
     if (port) return port;
   }
@@ -366,7 +464,7 @@ function detectConfigPort(appDir, deps, script) {
 // A config-file port and the framework default both need no running server; a
 // port bound only at runtime does, and that is #404's probe (probe-port.mjs),
 // run at setup time, not here.
-function detectPort(pkg, appDir) {
+function detectPort(pkg, appDir, rootDeps = []) {
   const start = detectStartCommand(pkg);
   const script = start ? pkg.scripts?.[start] : null;
   const deps = declaredDependencies(pkg);
@@ -390,7 +488,7 @@ function detectPort(pkg, appDir) {
     const inline = matchPort(INLINE_PORT, script);
     if (inline) return { port: inline, fromCommand: true, fromConfig: false };
   }
-  const config = detectConfigPort(appDir, deps, script);
+  const config = detectConfigPort(appDir, deps, script, rootDeps);
   if (config) return { port: config, fromCommand: false, fromConfig: true };
   return { port: frameworkPort(deps), fromCommand: false, fromConfig: false };
 }
@@ -544,6 +642,52 @@ function detectLinter(repoRoot) {
   return 'none';
 }
 
+// The Biome version a Biome repo runs, for gating the suite's Playwright rules
+// and pinning the suite's own @biomejs/biome. The version installed at the repo
+// root wins, since that is what the repo actually runs; a declared range is the
+// fallback when nothing is installed yet. Null when the repo does neither, such
+// as a root biome.json run through a global binary.
+function detectBiome(repoRoot) {
+  const installed = join(repoRoot, 'node_modules/@biomejs/biome/package.json');
+  if (existsSync(installed)) {
+    try {
+      const { version } = JSON.parse(readFileSync(installed, 'utf8'));
+      if (typeof version === 'string') return version;
+    } catch {
+      // An unreadable install falls through to the declared range.
+    }
+  }
+  const pkg = readPackageJson(repoRoot);
+  return pkg.dependencies?.['@biomejs/biome'] ?? pkg.devDependencies?.['@biomejs/biome'] ?? null;
+}
+
+// Resolve the Biome version from a detect() report. Null when detection found
+// nothing, or the report predates Biome version detection.
+export function resolveBiome(report) {
+  return report.biome ?? null;
+}
+
+// The first Biome release carrying the Playwright rules the suite enables. An
+// older Biome rejects a config naming them as a configuration error, which
+// stops the whole lint run, so the suite gets no Biome config below it.
+export const BIOME_PLAYWRIGHT_MIN = '2.4.2';
+
+// True when a Biome version, or the floor of its range, is at or above
+// BIOME_PLAYWRIGHT_MIN. Only a single `X.Y.Z`, `^X.Y.Z`, `~X.Y.Z` or
+// `>=X.Y.Z` is read. A partial version (`2`, `^2`), a compound range, a tag
+// and a protocol such as `catalog:` do not name a floor, so they read false.
+export function reachesBiomePlaywrightMin(spec) {
+  if (typeof spec !== 'string') return false;
+  const match = /^\s*(?:\^|~|>=)?v?(\d+)\.(\d+)\.(\d+)\s*$/.exec(spec);
+  if (!match) return false;
+  const version = match.slice(1).map(Number);
+  const min = BIOME_PLAYWRIGHT_MIN.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (version[i] !== min[i]) return version[i] > min[i];
+  }
+  return true;
+}
+
 // Resolve the linter to follow, from a detect() report. detectLinter always
 // returns a concrete value, so this only guards a report that predates linter
 // detection — mirroring resolveTestIdAttribute's null-handling.
@@ -624,8 +768,11 @@ function parsePnpmWorkspaceYaml(content) {
 
 function expandWorkspacePatterns(repoRoot, patterns) {
   const paths = [];
-  for (const pattern of patterns) {
-    if (pattern.startsWith('!')) continue;
+  for (const rawPattern of patterns) {
+    if (rawPattern.startsWith('!')) continue;
+    // `./packages/*` names the same members as `packages/*`; strip the prefix so
+    // every path is repo-relative and matches the exclusion filter below.
+    const pattern = rawPattern.replace(/^\.\//, '').replace(/\/$/, '');
     if (pattern.endsWith('/*')) {
       const prefix = pattern.slice(0, -2);
       const dir = join(repoRoot, prefix);
@@ -637,9 +784,40 @@ function expandWorkspacePatterns(repoRoot, patterns) {
       }
       continue;
     }
+    if (pattern.endsWith('/**')) {
+      paths.push(...findMembersBelow(repoRoot, pattern.slice(0, -3)));
+      continue;
+    }
     if (existsSync(join(repoRoot, pattern, 'package.json'))) paths.push(pattern);
   }
-  return paths;
+  // Overlapping patterns (`packages/*` and `packages/**`) name one member twice.
+  return [...new Set(paths)].filter((path) => matchesWorkspacePatterns(patterns, path));
+}
+
+// Whether `path` is a member under `patterns`, honoring `!` exclusions with the
+// last matching pattern winning — the rule package managers apply.
+function matchesWorkspacePatterns(patterns, path) {
+  let member = false;
+  for (const pattern of patterns) {
+    const negated = pattern.startsWith('!');
+    if (matchesWorkspaceGlob(negated ? pattern.slice(1) : pattern, path)) member = !negated;
+  }
+  return member;
+}
+
+// Every directory under `prefix`, at any depth, that holds a package.json — the
+// members a `dir/**` workspace pattern names. node_modules is never descended.
+function findMembersBelow(repoRoot, prefix) {
+  const members = [];
+  const dir = join(repoRoot, prefix);
+  if (!existsSync(dir)) return members;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === 'node_modules') continue;
+    const candidate = `${prefix}/${entry.name}`;
+    if (existsSync(join(repoRoot, candidate, 'package.json'))) members.push(candidate);
+    members.push(...findMembersBelow(repoRoot, candidate));
+  }
+  return members;
 }
 
 // Conventional monorepo layout, scanned only when nothing is declared. Plenty
@@ -751,26 +929,24 @@ function matchesWorkspaceGlob(glob, path) {
 // needs its own package.json to be a member.
 export function isWorkspaceMember(repoRoot, relativePath, packageManager) {
   if (!existsSync(join(repoRoot, relativePath, 'package.json'))) return false;
-  let member = false;
-  for (const pattern of workspacePatternsFor(repoRoot, packageManager)) {
-    const negated = pattern.startsWith('!');
-    if (matchesWorkspaceGlob(negated ? pattern.slice(1) : pattern, relativePath)) member = !negated;
-  }
-  return member;
+  return matchesWorkspacePatterns(workspacePatternsFor(repoRoot, packageManager), relativePath);
 }
 
 export const STANDALONE_WEB_DIR = 'e2e/web';
 
 // install-playwright.mjs installs into e2e/web as a self-contained sub-package
 // on purpose, outside any declared workspace. Probe it directly so it's never
-// missed just because no workspace pattern names it. The persisted root
-// manifest's location is probed the same way: a suite scaffolded at a custom,
-// non-workspace location (e.g. 'services/e2e') is otherwise invisible to every
-// caller of detect() — run-specs/validate-specs would report 'no-playwright'
-// for a suite that is right there on disk.
-function discoverLocationPaths(repoRoot, rootPkg) {
+// missed just because no workspace pattern names it. A suite scaffolded at a
+// custom, non-workspace location (e.g. 'services/e2e') is otherwise invisible
+// to every caller of detect() — run-specs/validate-specs would report
+// 'no-playwright' for a suite that is right there on disk. The location is
+// agent-passed (from the `### E2E bindings` Location row), so it is probed the
+// same way and validated first.
+function discoverLocationPaths(repoRoot, rootPkg, location) {
   const paths = ['.', ...discoverWorkspacePaths(repoRoot, rootPkg)];
-  const standaloneCandidates = [STANDALONE_WEB_DIR, readRootManifest(repoRoot)?.location].filter(Boolean);
+  const standaloneCandidates = [STANDALONE_WEB_DIR, location ? assertSafeLocation(repoRoot, location) : null].filter(
+    Boolean,
+  );
   for (const candidate of standaloneCandidates) {
     if (!paths.includes(candidate) && existsSync(join(repoRoot, candidate, 'package.json'))) {
       paths.push(candidate);
@@ -782,7 +958,7 @@ function discoverLocationPaths(repoRoot, rootPkg) {
 export function detect(targetPath, options = {}) {
   const rootPkg = readPackageJson(targetPath);
   const packageManager = detectPackageManager(targetPath);
-  const locationPaths = discoverLocationPaths(targetPath, rootPkg);
+  const locationPaths = discoverLocationPaths(targetPath, rootPkg, options.location);
   const locationDirs = locationPaths.map((relativePath) =>
     relativePath === '.' ? targetPath : join(targetPath, relativePath),
   );
@@ -805,10 +981,15 @@ export function detect(targetPath, options = {}) {
   const locations = locationPaths.map((relativePath) => {
     const absolutePath = relativePath === '.' ? targetPath : join(targetPath, relativePath);
     const pkg = readPackageJson(absolutePath);
-    const portInfo = detectPort(pkg, absolutePath);
+    const portInfo = detectPort(pkg, absolutePath, declaredDependencies(rootPkg));
     return {
       path: relativePath,
-      playwright: detectPlaywright(absolutePath),
+      playwright: detectPlaywright(
+        absolutePath,
+        targetPath,
+        resolvedManager,
+        isWorkspaceMember(targetPath, relativePath, resolvedManager),
+      ),
       startCommand: detectStartCommand(pkg),
       port: portInfo.port,
       portFromCommand: portInfo.fromCommand,
@@ -829,6 +1010,9 @@ export function detect(targetPath, options = {}) {
     taskRunner: detectTaskRunner(targetPath),
     linter: detectLinter(targetPath),
     typescript: detectTypeScript(targetPath),
+    typesNode: detectTypesNode(targetPath),
+    eslint: detectEslint(targetPath),
+    biome: detectBiome(targetPath),
     existingE2eFramework: detectExistingE2eFramework(e2eProbeDirs),
     bootstrapScript: detectBootstrapScript(rootPkg),
     testIdAttribute: detectTestIdAttribute(targetPath),
@@ -840,7 +1024,10 @@ const isMainModule = process.argv[1] && realpathSync(process.argv[1]) === fileUR
 if (isMainModule) {
   try {
     const targetPath = process.argv[2] ?? '.';
-    console.log(JSON.stringify(detect(targetPath), null, 2));
+    const args = process.argv.slice(3);
+    const locationIndex = args.indexOf('--location');
+    const location = locationIndex !== -1 ? args[locationIndex + 1] : undefined;
+    console.log(JSON.stringify(detect(targetPath, { location }), null, 2));
   } catch (err) {
     console.log(JSON.stringify({ status: 'error', message: err.message }, null, 2));
     process.exitCode = 0;

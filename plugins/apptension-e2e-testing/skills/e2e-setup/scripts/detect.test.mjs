@@ -4,7 +4,6 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { detect } from './detect.mjs';
-import { MANIFEST_NAME } from './manifest.mjs';
 
 function makeRepo() {
   return mkdtempSync(join(tmpdir(), 'detect-language-'));
@@ -76,28 +75,25 @@ test('a Playwright report/output dir in the suite is not scanned for specs', () 
   assert.equal(detect(dir).language, 'ts');
 });
 
-test('the e2e package dir comes from the persisted location, not a hardcoded e2e/web', () => {
+test('a stray .e2e-scaffold.json at the repo root is not consulted for the suite location', () => {
   const dir = makeRepo();
   writeFileSync(join(dir, 'tsconfig.json'), '{}');
-  writeFileSync(join(dir, MANIFEST_NAME), JSON.stringify({ location: 'services/e2e' }));
+  writeFileSync(join(dir, '.e2e-scaffold.json'), JSON.stringify({ location: 'services/e2e' }));
 
-  // The relocated package is JS, despite the TS root.
+  // A suite at the manifest's location is JS — if it were consulted, the
+  // language would read as js despite the TS root.
   mkdirSync(join(dir, 'services', 'e2e', 'specs'), { recursive: true });
   writeFileSync(join(dir, 'services', 'e2e', 'specs', 'login.spec.js'), '');
 
-  // A stray e2e/web with its own tsconfig.json must NOT be consulted — the
-  // persisted answer names services/e2e, not the hardcoded default.
-  mkdirSync(join(dir, 'e2e', 'web'), { recursive: true });
-  writeFileSync(join(dir, 'e2e', 'web', 'tsconfig.json'), '{}');
-
-  assert.equal(detect(dir).language, 'js');
+  // No suite exists at the hardcoded e2e/web default, so the language falls
+  // back to the root tsconfig.json instead of the manifest's answer.
+  assert.equal(detect(dir).language, 'ts');
 });
 
-test('an explicit specDir wins over the default e2e/web when nothing is persisted', () => {
+test('an explicit specDir wins over the default e2e/web with no suite there', () => {
   const dir = makeRepo();
-  // No root tsconfig.json, no .e2e-scaffold.json — a suite never onboarded
-  // via e2e-setup. Its real location (services/e2e) is TS; nothing at the
-  // default e2e/web exists at all.
+  // No root tsconfig.json — a suite never onboarded via e2e-setup. Its real
+  // location (services/e2e) is TS; nothing at the default e2e/web exists at all.
   mkdirSync(join(dir, 'services', 'e2e', 'specs'), { recursive: true });
   writeFileSync(join(dir, 'services', 'e2e', 'specs', 'login.spec.ts'), '');
 

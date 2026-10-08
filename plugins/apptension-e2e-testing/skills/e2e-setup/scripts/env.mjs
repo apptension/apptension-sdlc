@@ -87,6 +87,10 @@ const KEYS = [
     key: 'E2E_BASIC_AUTH_PASSWORD',
     aliases: ['BASIC_AUTH_PASSWORD', 'BASIC_AUTH_PASS', 'HTTP_BASIC_PASSWORD'],
   },
+  // Opt-in auth mode read by fixtures/base.ts. Blank means the shared saved
+  // login; `per-worker` logs each worker in on its own. No aliases: nothing
+  // else in a repo means this.
+  { key: 'E2E_AUTH_MODE', aliases: [] },
 ];
 
 // The names, in file order. scaffold.mjs writes .env.example from this, so the

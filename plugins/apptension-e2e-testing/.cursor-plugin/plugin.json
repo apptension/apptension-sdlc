@@ -1,8 +1,8 @@
 {
   "name": "apptension-e2e-testing",
   "displayName": "Apptension E2E Testing",
-  "version": "0.10.0",
-  "description": "Apptension E2E testing — generates Playwright end-to-end test specs from a ticket's description, unit tests, and a testing-guide doc, then verifies they run.",
+  "version": "0.12.22",
+  "description": "Apptension E2E testing — generates Playwright end-to-end test specs from a ticket's description, its diff, and its unit tests — plus a testing-guide section when the ticket carries one — then verifies they run.",
   "author": {
     "name": "Apptension"
   },

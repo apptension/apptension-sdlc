@@ -93,5 +93,7 @@ const isMainModule =
   process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMainModule) {
   const targetPath = process.argv[2] ?? '.';
-  console.log(JSON.stringify(resolveBlocklist(targetPath), null, 2));
+  const index = process.argv.indexOf('--location');
+  const location = index !== -1 ? process.argv[index + 1] : undefined;
+  console.log(JSON.stringify(resolveBlocklist(targetPath, { location }), null, 2));
 }

@@ -1,0 +1,47 @@
+name: Task
+description: A unit of work for the AI-assisted SDLC
+title: "[Task]: "
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context / Why
+      description: Why does this work need to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What needs to be done
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Checklist of what "done" looks like
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: The part of the system or process this touches
+      options:
+        - "%%AREA_OPTIONS%%"
+    validations:
+      required: true
+  - type: textarea
+    id: related-links
+    attributes:
+      label: Related links
+      description: Links to specs, other issues, or docs (optional)
+    validations:
+      required: false
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: What this issue explicitly does not cover (optional)
+    validations:
+      required: false

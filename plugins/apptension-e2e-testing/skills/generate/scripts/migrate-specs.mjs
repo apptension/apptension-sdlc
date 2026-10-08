@@ -92,9 +92,9 @@ function ledgerSpecDirDisagrees(targetPath, ledgerRelativePath, resolvedSpecDir)
 }
 
 export function migrateSpecs(targetPath, options = {}) {
-  const { map = {}, apply = false, deleteLedgers = false, run = defaultRun, specDir: specDirOption } = options;
+  const { map = {}, apply = false, deleteLedgers = false, run = defaultRun, specDir: specDirOption, location } = options;
 
-  const specDir = resolveSpecDir(targetPath, { specDir: specDirOption });
+  const specDir = resolveSpecDir(targetPath, { specDir: specDirOption, location });
   const specDirAbsolute = join(targetPath, specDir);
 
   // Flows named in --map count as known, so one flag teaches a flow and its
@@ -180,6 +180,8 @@ if (isMainModule) {
   const args = process.argv.slice(3);
   const specDirIndex = args.indexOf('--spec-dir');
   const specDir = specDirIndex !== -1 ? args[specDirIndex + 1] : undefined;
+  const locationIndex = args.indexOf('--location');
+  const location = locationIndex !== -1 ? args[locationIndex + 1] : undefined;
 
   try {
     const result = migrateSpecs(targetPath, {
@@ -187,6 +189,7 @@ if (isMainModule) {
       apply: args.includes('--apply'),
       deleteLedgers: args.includes('--delete-ledgers'),
       specDir,
+      location,
     });
     console.log(JSON.stringify(result, null, 2));
   } catch (err) {

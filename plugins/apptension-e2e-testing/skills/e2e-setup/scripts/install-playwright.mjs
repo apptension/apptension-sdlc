@@ -1,10 +1,22 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { detect, isWorkspaceMember, resolvePackageManager, resolveLinter, resolveTypescript } from './detect.mjs';
-import { hasFlatEslintConfig } from './scaffold.mjs';
-import { resolveLocation, readRootManifest, manifestLinter, manifestTypescript, resolveOverride } from './manifest.mjs';
+import {
+  detect,
+  isWorkspaceMember,
+  reachesBiomePlaywrightMin,
+  readPackageJson,
+  resolveBiome,
+  resolveEslint,
+  resolvePackageManager,
+  resolveLinter,
+  resolveTypescript,
+} from './detect.mjs';
+import { hasBiomeConfig, hasFlatEslintConfig, renderStandaloneTsconfig } from './scaffold.mjs';
+import { resolveLocation, resolveOverride } from './manifest.mjs';
 
 // Root files each manager is known to create or rewrite when it installs a
 // dependency into a workspace member — the lockfile and (pnpm) the workspace
@@ -32,6 +44,25 @@ export function predictRootFilesTouched(root, packageManager, webDir = 'e2e/web'
   return ROOT_FILES_BY_MANAGER[key];
 }
 
+// pnpm walks up to the nearest pnpm-workspace.yaml and writes an importer for
+// the suite into that root's lockfile even when the workspace globs exclude the
+// suite. --ignore-workspace keeps a non-member suite standalone, with its own
+// pnpm-lock.yaml, on pnpm 9 and 10 alike. A suite-local pnpm-workspace.yaml
+// with `packages: []` would do the same on pnpm 10, but pnpm 9 refuses to add
+// to it without -w (ERR_PNPM_ADDING_TO_ROOT).
+function workspaceFlags(root, key, webDir) {
+  return key === 'pnpm' && !isWorkspaceMember(root, webDir, key) ? ['--ignore-workspace'] : [];
+}
+
+// A content hash per root file, or null for an absent one, so a file the
+// install creates reads as changed the same way an edited one does.
+function hashRootFiles(root, files) {
+  return files.map((file) => {
+    const abs = join(root, file);
+    return existsSync(abs) ? createHash('sha256').update(readFileSync(abs)).digest('hex') : null;
+  });
+}
+
 function defaultNotify(rootFilesTouched) {
   if (rootFilesTouched.length === 0) return;
   console.error(
@@ -51,7 +82,59 @@ const BASE_DEP = '@playwright/test';
 // shadow the older/parent ESLint that config relies on and break their lint.
 // `eslint-plugin-playwright` carries the timing/await rules;
 // `@typescript-eslint/parser` lets eslint parse the specs.
-const LINT_DEPS = ['eslint', 'eslint-plugin-playwright', '@typescript-eslint/parser'];
+//
+// `eslint` is pinned to the repo's declared version, and to defaultEslint() when
+// the repo declares none, because an unpinned add takes the latest ESLint major
+// and the parser it pairs with may not support it: ESLint 10 with parser 7.x
+// crashes on `scopeManager.addGlobals` (#613). The parser is pinned to
+// PARSER_RANGE, whose peer range is ESLint `^8.57.0 || ^9.0.0 || ^10.0.0`, so
+// a 7.x left in a workspace lockfile is not reused. defaultEslint picks the
+// newest major that range covers and the running Node supports; move them
+// together.
+const PARSER_RANGE = '^8';
+function lintDeps(eslintVersion, nodeVersion) {
+  const eslint = eslintVersion && reachesParserFloor(eslintVersion) ? eslintVersion : defaultEslint(nodeVersion);
+  return [`eslint@${eslint}`, 'eslint-plugin-playwright', `@typescript-eslint/parser@${PARSER_RANGE}`];
+}
+
+// The ESLint range used when the repo's own cannot be pinned. ESLint 10 needs
+// Node `^20.19.0 || ^22.13.0 || >=24`, and the lint run uses the Node running
+// setup, so an older runtime gets ESLint 9 rather than a lint run that crashes.
+export function defaultEslint(nodeVersion = process.versions.node) {
+  const [major, minor] = nodeVersion.split('.').map(Number);
+  const runsEslint10 = (major === 20 && minor >= 19) || (major === 22 && minor >= 13) || major >= 24;
+  return runsEslint10 ? '^10' : '^9';
+}
+
+// True when a declared ESLint range can resolve to 8.57 or newer, the floor of
+// PARSER_RANGE's peer range. Only a single `X.Y.Z`, `^X.Y.Z` or `~X.Y.Z` is
+// read. Anything else falls back to defaultEslint: a range held below 8.57
+// (`8.56.0`, `~8.50.0`, `^7`) cannot install beside parser 8, a compound range
+// (`>=8 <8.57`, `^8 || ^9`) would need a full semver evaluator to judge, and a
+// protocol such as `catalog:` does not parse. The default already satisfies
+// an open `>=8` range, and the suite is its own package, so the fallback still
+// lints.
+function reachesParserFloor(range) {
+  const match = /^\s*(\^|~)?v?(\d+)(?:\.(\d+))?(?:\.\d+)?\s*$/.exec(range);
+  if (!match) return false;
+  const [, op, major, minor = '0'] = match;
+  if (Number(major) !== 8) return Number(major) > 8;
+  return op === '^' || Number(minor) >= 57;
+}
+
+// The exit code for lint findings, which a re-run over existing specs can have.
+// Every other failure fails setup: ESLint's exit 2 (a crash or a config error),
+// and a lint run that never started, where execFileSync sets `status` to null.
+const LINT_FINDINGS_EXIT = 1;
+// Biome exits 1 for findings and for a configuration error alike, so a lint
+// script that runs Biome counts as findings only when its output carries this
+// line, which Biome prints after reporting diagnostics and not when it stops on
+// its config. A suite that kept a lint script of its own running another tool
+// keeps that tool's exit-code meaning.
+const BIOME_FINDINGS_LINE = 'Some errors were emitted while running checks';
+// How much of a crashed lint run's output the error message keeps: ESLint's
+// diagnostic and its first stack frames, not the package manager's preamble.
+const LINT_DETAIL_LINES = 15;
 
 // The add verb per manager; the dependency list is appended at call time.
 const ADD_VERBS = {
@@ -61,15 +144,70 @@ const ADD_VERBS = {
   bun: ['bun', 'add'],
 };
 
+// The child's stdout goes to stderr: stdout carries only this script's JSON
+// result, and the human still sees the progress in the terminal. A caller that
+// pipes stdout gets the child's output back instead.
 function defaultRun(command, args, options) {
-  execFileSync(command, args, { stdio: 'inherit', ...options });
+  return execFileSync(command, args, { stdio: ['inherit', process.stderr, 'inherit'], ...options });
+}
+
+// The add skips the repo's lifecycle scripts: setup adds Playwright and
+// nothing else, and a root `postinstall` or `prepare` can build, install git
+// hooks or reach the network (#715). Playwright's browsers come from
+// install-browsers.mjs, not from a postinstall. Yarn Berry's `add` rejects
+// --ignore-scripts, and its enableScripts setting skips third-party scripts
+// but still runs a workspace's own, so Yarn 3 and later get --mode=skip-build,
+// which skips the whole build step. Yarn 2 has no --mode, so it gets
+// YARN_ENABLE_SCRIPTS=0, which is the most that version offers. The yarn
+// binary in the suite directory is the one that runs the add, so its own
+// version says which Yarn this is. Only stdout is piped, so a Corepack
+// download prompt on this first yarn call still reaches the human.
+function skipScripts(key, run, webAbs) {
+  if (key !== 'yarn') return { flags: ['--ignore-scripts'], env: null };
+  const version = run('yarn', ['--version'], { cwd: webAbs, stdio: ['inherit', 'pipe', 'inherit'], encoding: 'utf8' });
+  const major = Number(String(version ?? '').trim().split('.')[0]);
+  if (major >= 3) return { flags: ['--mode=skip-build'], env: null };
+  if (major === 2) return { flags: [], env: { ...process.env, YARN_ENABLE_SCRIPTS: '0' } };
+  return { flags: ['--ignore-scripts'], env: null };
+}
+
+// The version of the TypeScript the suite's tsc resolves, or null when there
+// is none to read. Node's lookup order from the suite directory, so a copy a
+// workspace install hoisted to an ancestor node_modules counts. The candidate
+// directories are checked by hand, not through require.resolve, so a package
+// `exports` map that hides package.json cannot hide the version.
+function installedTypescript(webAbs) {
+  const dirs = createRequire(join(webAbs, 'package.json')).resolve.paths('typescript') ?? [];
+  for (const dir of dirs) {
+    try {
+      return JSON.parse(readFileSync(join(dir, 'typescript/package.json'), 'utf8')).version ?? null;
+    } catch {
+      // not installed here, or unreadable: try the next directory up
+    }
+  }
+  return null;
+}
+
+// The scaffold writes the standalone suite tsconfig.json with NodeNext before
+// any TypeScript is installed, and NodeNext needs 4.7. Once the install has
+// run, the installed version is known, so an older one gets the legacy module
+// pair. Only a file still exactly as the scaffold wrote it is rewritten.
+// Returns what changed, or null when nothing did.
+function fitTsconfigToTypescript(webAbs) {
+  const path = join(webAbs, 'tsconfig.json');
+  if (!existsSync(path) || readFileSync(path, 'utf8') !== renderStandaloneTsconfig()) return null;
+  const version = installedTypescript(webAbs);
+  const [major, minor] = (version ?? '').split('.').map(Number);
+  if (!Number.isInteger(major) || !Number.isInteger(minor) || major > 4 || (major === 4 && minor >= 7)) return null;
+  writeFileSync(path, renderStandaloneTsconfig({ legacy: true }));
+  return { typescript: version, moduleResolution: 'Node' };
 }
 
 // Install @playwright/test into the self-contained e2e/web sub-package. Paths
 // resolve from targetPath and the command runs with cwd set to e2e/web, so no
 // caller `cd` is needed. `run` is injectable (mirrors install-browsers.mjs).
 export function installPlaywright(targetPath, options = {}) {
-  const { packageManager, run = defaultRun, notify = defaultNotify, linter, typescript } = options;
+  const { packageManager, run = defaultRun, notify = defaultNotify, linter, typescript, nodeVersion } = options;
   // Resolve to absolute so the install runs against the suite location
   // regardless of the caller's cwd (the SKILL invites a relative target like
   // `webapp`).
@@ -99,27 +237,74 @@ export function installPlaywright(targetPath, options = {}) {
     if (!existsSync(yarnrcPath)) writeFileSync(yarnrcPath, 'nodeLinker: node-modules\n');
   }
   // Report the blast radius outside e2e/web BEFORE installing, so the user sees
-  // what shared root config the manager is about to touch, not only after.
-  const rootFilesTouched = predictRootFilesTouched(root, key, webDir);
-  notify(rootFilesTouched);
+  // what shared root config the manager is about to touch, not only after. The
+  // notice carries the prediction. The result carries the manager's root files
+  // the install actually created or changed, hashed before and after whatever
+  // the prediction said, so an install that reaches root unpredicted still
+  // shows up.
+  notify(predictRootFilesTouched(root, key, webDir));
+  const rootFiles = ROOT_FILES_BY_MANAGER[key];
+  const hashesBefore = hashRootFiles(root, rootFiles);
   // The lint stack rides along only when the repo lints with ESLint (or has no
   // linter) AND a flat config is present. Gate on the resolved linter too, not
   // the config alone: a Biome repo whose e2e/web already holds an eslint config
   // (an old-plugin scaffold, or hand-authored) would otherwise still get the
   // ESLint deps installed, contradicting "a Biome repo gets no ESLint deps".
-  // An explicit choice wins, then the persisted manifest, then detection.
-  const resolvedLinter = resolveOverride(linter, manifestLinter(readRootManifest(root)), resolveLinter(detect(root)));
+  // An explicit choice wins, else detection.
+  const resolvedLinter = resolveOverride(linter, resolveLinter(detect(root)));
   // Pin e2e/web's own `typescript` to the repo's version — same explicit ->
-  // persisted -> detected order as the linter above — so specs typecheck
-  // against the same TS the app uses instead of whatever an unpinned
-  // `@typescript-eslint/parser` install happens to resolve (#449). Unpinned
-  // (bare 'typescript') when the repo declares no version.
-  const resolvedTypescript = resolveOverride(typescript, manifestTypescript(readRootManifest(root)), resolveTypescript(detect(root)));
+  // detected order as the linter above — so specs typecheck against the same
+  // TS the app uses instead of whatever an unpinned `@typescript-eslint/parser`
+  // install happens to resolve (#449). Unpinned (bare 'typescript') when the
+  // repo declares no version.
+  const resolvedTypescript = resolveOverride(typescript, resolveTypescript(detect(root)));
   const tsDep = resolvedTypescript ? `typescript@${resolvedTypescript}` : 'typescript';
-  const deps = resolvedLinter !== 'biome' && hasFlatEslintConfig(webAbs) ? [BASE_DEP, tsDep, ...LINT_DEPS] : [BASE_DEP, tsDep];
+  // A TypeScript suite also gets `@types/node`: the scaffolded fixtures/base.ts
+  // imports `node:fs` and reads `process.env`, and a workspace package gets no
+  // types from the root. Pinned to the root's declared version the same way as
+  // `typescript`, unpinned when the repo declares none. A JavaScript suite is
+  // never type-checked, so it gets none.
+  const report = detect(root, options);
+  const typesNodeDeps = report.language === 'ts' ? [report.typesNode ? `@types/node@${report.typesNode}` : '@types/node'] : [];
+  const withLint = resolvedLinter !== 'biome' && hasFlatEslintConfig(webAbs);
+  // A Biome suite gets its own @biomejs/biome, pinned to the root's version so
+  // the suite lints with the Biome the repo runs, and only where scaffold wrote
+  // or found a suite Biome config and that Biome carries the Playwright rules.
+  const biomeVersion = resolveBiome(report);
+  const withBiome = resolvedLinter === 'biome' && hasBiomeConfig(webAbs) && reachesBiomePlaywrightMin(biomeVersion);
+  const deps = [
+    BASE_DEP,
+    tsDep,
+    ...typesNodeDeps,
+    ...(withLint ? lintDeps(resolveEslint(detect(root)), nodeVersion) : []),
+    ...(withBiome ? [`@biomejs/biome@${biomeVersion}`] : []),
+  ];
   const [command, verb] = ADD_VERBS[key];
-  run(command, [verb, '-D', ...deps], { cwd: webAbs });
-  return { status: 'ok', packageManager: key, webDir, rootFilesTouched };
+  const { flags, env } = skipScripts(key, run, webAbs);
+  run(command, [verb, '-D', ...flags, ...workspaceFlags(root, key, webDir), ...deps], {
+    cwd: webAbs,
+    ...(env ? { env } : {}),
+  });
+  const hashesAfter = hashRootFiles(root, rootFiles);
+  const rootFilesTouched = rootFiles.filter((_, i) => hashesBefore[i] !== hashesAfter[i]);
+  const tsconfigRewritten = fitTsconfigToTypescript(webAbs);
+  const result = { status: 'ok', packageManager: key, webDir, rootFilesTouched, ...(tsconfigRewritten ? { tsconfigRewritten } : {}) };
+  if (!withLint && !withBiome) return result;
+  // Lint the suite once, so a lint stack that installs but cannot run is caught
+  // here instead of on the first spec the generate skill writes. Output is
+  // captured rather than inherited, so a crash message can carry the linter's
+  // own diagnostic instead of execFileSync's generic "Command failed".
+  try {
+    run(command, ['run', 'lint'], { cwd: webAbs, stdio: 'pipe', encoding: 'utf8' });
+    return { ...result, lint: 'passed' };
+  } catch (err) {
+    const output = [err.stdout, err.stderr].filter(Boolean).join('\n').trim();
+    const runsBiome = /\bbiome\b/.test(readPackageJson(webAbs).scripts?.lint ?? '');
+    const findings = err.status === LINT_FINDINGS_EXIT && (!runsBiome || output.includes(BIOME_FINDINGS_LINE));
+    if (findings) return { ...result, lint: 'findings' };
+    const detail = output ? output.split('\n').slice(-LINT_DETAIL_LINES).join('\n') : err.message;
+    return { ...result, status: 'error', lint: 'crashed', message: `\`${command} run lint\` in ${webDir} crashed after install:\n${detail}` };
+  }
 }
 
 const isMainModule = process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);

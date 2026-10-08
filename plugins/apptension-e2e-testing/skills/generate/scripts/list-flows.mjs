@@ -67,11 +67,15 @@ const isMainModule = process.argv[1] && realpathSync(process.argv[1]) === fileUR
 if (isMainModule) {
   const targetPath = process.argv[2] ?? '.';
   const args = process.argv.slice(3);
-  const specDirIndex = args.indexOf('--spec-dir');
-  const specDir = specDirIndex !== -1 ? args[specDirIndex + 1] : undefined;
+  const flag = (name) => {
+    const i = args.indexOf(name);
+    return i !== -1 ? args[i + 1] : undefined;
+  };
+  const specDir = flag('--spec-dir');
+  const location = flag('--location');
 
   try {
-    console.log(JSON.stringify(listFlows(targetPath, { specDir }), null, 2));
+    console.log(JSON.stringify(listFlows(targetPath, { specDir, location }), null, 2));
   } catch (err) {
     console.log(JSON.stringify({ status: 'error', message: err.message }, null, 2));
     process.exitCode = 0;

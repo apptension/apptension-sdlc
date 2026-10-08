@@ -51,7 +51,8 @@ for a Jira key. Ticket fetch, classification, the test plan, no-diff
 routing, and spec *writing* all work for Jira: pass the Jira key as the
 `ticket` in step 6's `write-specs.mjs` payload (e.g. `"ticket": "ABC-123"`)
 the same way a GitHub number is passed, and every generated spec carries it
-in its `// issue:<ticket>` provenance line.
+in its `// issue:<ticket>` provenance line. A Jira ticket is a bug issue when
+its issue type is `Bug`.
 
 ## Steps
 
@@ -59,8 +60,11 @@ in its `// issue:<ticket>` provenance line.
    the current repo):
 
    ```bash
-   node scripts/gather-context.mjs <issue number> [target path]
+   node scripts/gather-context.mjs <issue number> [target path] [--base <branch>]
    ```
+
+   `--base` overrides the auto-detected base branch — the default repo
+   detects it from `origin/HEAD`, falling back to `main` then `master`.
 
    Read the JSON it prints:
 
@@ -69,9 +73,11 @@ in its `// issue:<ticket>` provenance line.
      fetched separately.
    - `diffSource` — `"git"` (a local diff against the detected base
      branch), `"gh-pr"` (fell back to the issue's linked pull request,
-     because there was no local diff to read), or `"none"` (neither
-     source had anything — route it per "Routing a ticket with no diff,"
-     rather than stopping).
+     because the local diff was empty or could not be computed), or
+     `"none"` (neither source had anything — route it per "Routing a
+     ticket with no diff," rather than stopping). On `"gh-pr"`,
+     `changedFiles` is the PR's list plus any untracked working-tree
+     files, which are local-only and so cannot appear in the PR.
    - `branch` / `base` — the branch the diff was actually taken on, and
      the base branch it was compared against (`null` when no local diff
      was attempted). Sanity-check these against the issue you're
@@ -79,6 +85,20 @@ in its `// issue:<ticket>` provenance line.
      to this issue, don't trust `diffSource: "git"` at face value — it
      only means *some* local diff was found, not that it's the right
      one. Prefer the PR fallback, or ask the human, instead of guessing.
+   - `pr` — present on `"gh-pr"` only: `{ number, state, inCheckout }`.
+     `state` is the pull request's `OPEN`, `MERGED` or `CLOSED`, or `null`
+     when its view failed. `inCheckout` comes with `OPEN` and `MERGED`:
+     whether this checkout's `HEAD` contains the pull request's head commit
+     (`OPEN`) or its merge commit (`MERGED`). Steps 4 to 8 boot and test this
+     checkout, so route on it before step 2:
+
+     | `pr` | Do |
+     |---|---|
+     | `state: "OPEN"`, `inCheckout: false` | **Stop.** Say the run would test this checkout, which lacks pull request `<number>`'s code, and tell the human to run `gh pr checkout <number>` and run `generate` again. The re-run finds a local diff |
+     | `state: "MERGED"`, `inCheckout: false` | **Stop.** Say this checkout predates pull request `<number>`'s merge, and tell the human to update it to include the merge, for example by pulling its base branch, and run `generate` again |
+     | `state: "CLOSED"` | **Stop.** Say pull request `<number>` closed without merging, so this checkout lacks its code. Ask the human to check out the code to test, such as `gh pr checkout <number>`, and run `generate` again |
+     | `state: null` | **Stop.** Say the pull request's state could not be read, so the run cannot confirm it would test the change. Re-running once is fine |
+     | Anything else | Continue |
    - `changedFiles` — every file the issue's diff touched.
    - `testFiles` — the subset of `changedFiles` matching a unit-test
      naming convention (`*.test.*`, `*.spec.*`, `__tests__/`,
@@ -94,7 +114,7 @@ in its `// issue:<ticket>` provenance line.
 
      **Only trust these contents on `diffSource: "git"`.** The script
      reads them from the local checkout, and the `"gh-pr"` path is
-     reached precisely because that checkout has no diff against base —
+     reached only once the local diff comes back empty or errors out —
      so a test the PR *added* is missing from `testFiles` entirely
      (filtered out as a nonexistent path, silently), and one it
      *modified* comes back with the base branch's contents. On that path
@@ -108,6 +128,13 @@ in its `// issue:<ticket>` provenance line.
      A diff is the better source there anyway: it shows the assertions
      this issue added, which is what sub-step 1 needs, rather than the
      whole file's worth of pre-existing ones.
+   - `bug` — `"label"` when a label is `bug` or ends in it as a token
+     (`type: bug`, `kind/bug`, `type-bug`) and does not negate it
+     (`not-a-bug`, `non-bug` and `no-bug` do not count), `"type"` when the GitHub issue
+     type is `Bug`, `null` otherwise. Either value makes this a **bug
+     issue**: steps 2 and 3 mark which cases trace to the bug, and step 8
+     runs the specs against the pre-fix code as well. With `null`, a plan
+     case whose `_Traces to:_` starts with `Bug report` also makes it one.
 
 ### Routing a ticket with no diff
 
@@ -172,7 +199,7 @@ The discriminator is the absence of a diff, never the tracker's issue type.
 
       ```bash
       # diffSource: "git"
-      git diff origin/<base>...<branch> -- <path>
+      git diff $(git merge-base origin/<base> <branch>) -- <path>
       # diffSource: "gh-pr" — gh pr diff has no pathspec argument, so
       # isolate one file's hunk through the files API instead:
       gh api repos/{owner}/{repo}/pulls/<PR#>/files --jq '.[] | select(.filename=="<path>") | .patch'
@@ -225,7 +252,9 @@ The discriminator is the absence of a diff, never the tracker's issue type.
       came from, or a short diff-area description (e.g. a file or
       directory) when it has no matching criterion. A behavior taken
       from a changed unit test names that file, e.g. `"unit tests
-      (Foo.test.tsx)"`.
+      (Foo.test.tsx)"`. On a bug issue, a behavior the report describes
+      as broken, the one the fix restores, records `"Bug report: \"<the
+      report's words>\""`.
 
    5. **Record `reason`** — one sentence naming the boundary crossed, or
       the reason there is none, e.g. `"submit crosses the browser: POST
@@ -244,9 +273,9 @@ The discriminator is the absence of a diff, never the tracker's issue type.
 
       `"e2e"` here is a deliberate override, not sub-step 3's judgment
       applied and happening to agree: a Testing guide entry is a human
-      (or the dev-flow step that writes it) naming a behavior that needs
-      E2E coverage directly, the same trust sub-step 5 already extends
-      to a human's "add" request during revision. It is not re-judged
+      naming a behavior that needs E2E coverage directly, the same trust
+      sub-step 5 already extends to a human's "add" request during
+      revision. It is not re-judged
       against the boundary criterion — a guide entry for a behavior that
       turns out to be purely in-process still gets a case, on the
       strength of the guide having named it.
@@ -294,20 +323,42 @@ Otherwise, before step 3 drafts or presents a plan — and so before step 4
 ever boots or attaches to the app — confirm the target repo actually has
 Playwright installed somewhere:
 
+Read the `Location` row of the `### E2E bindings` section in the target's
+bindings file first. When it is present, pass it as `--location` so a suite
+relocated to a custom, non-workspace dir (say `services/e2e`) is included in
+the detection scan; when it is absent, pass no `--location` and let the
+script resolve the location itself:
+
 ```bash
-node scripts/check-playwright.mjs <target path>
+# Location row present:
+node scripts/check-playwright.mjs <target path> --location <location>
+# Location row absent:
+node scripts/check-playwright.mjs <target path>  # e2e-location-default
 ```
 
-This reuses `resolveLocation` from `run-specs.mjs` instead of a second
+Without the location, `detect` never probes a relocated suite dir, so a
+suite installed right there on disk reports `no-playwright` and generation
+stops. This reuses `resolveLocation` from `run-specs.mjs`, then reads the
+resolved location's on-disk install to tell a scaffolded-but-uninstalled
+worktree apart from a repo with no suite at all, instead of a second
 detection. No spec paths exist yet at this point, so it runs with an empty
-list — only its `no-playwright` status matters here; disambiguating
-between several Playwright installs needs real spec paths, and steps 4, 7
-and 8 each resolve that for themselves once those exist.
+list — only the location-level statuses (`no-playwright` and
+`scaffolded-not-installed`) matter here; disambiguating between several
+Playwright installs needs real spec paths, and steps 4, 7 and 8 each resolve
+that for themselves once those exist.
 
-- `no-playwright` — no location in the target repo has `@playwright/test`
-  installed. **Stop here**, before drafting or presenting a plan, booting
-  the app, or opening the Playwright MCP. Point the human at the
-  `e2e-setup` skill.
+- `no-playwright` — no location in the target repo declares
+  `@playwright/test`, so the suite is not scaffolded here. **Stop here**,
+  before drafting or presenting a plan, booting the app, or opening the
+  Playwright MCP. Point the human at the `e2e-setup` skill.
+- `scaffolded-not-installed` — a location declares `@playwright/test`, so the
+  suite is scaffolded, but its install is absent in this worktree — no
+  `node_modules` and no Yarn PnP loader. This is the ordinary state of a fresh
+  `dev-flow` worktree: `node_modules`, `.auth` and `.env` are gitignored and
+  never travel between worktrees. **Stop here**, the same as `no-playwright`,
+  but point the human at `message` — install the suite's dependencies and
+  restore this worktree's `.auth` and `.env`, then re-run. Do not run
+  `e2e-setup`; the suite is already set up.
 - Anything else — continue to step 3 as usual. Step 7's
   `validate-specs.mjs` call still runs its own check later, as a fallback
   for an install that changes mid-run.
@@ -326,17 +377,32 @@ and 8 each resolve that for themselves once those exist.
       the name of the user path it belongs to, matched against what
       already exists rather than guessed.
 
-      List what already exists first:
+      List what already exists first. Read the `Location` row of the
+      `### E2E bindings` section in the target's bindings file. When it is
+      present, pass it as `--location`; when it is absent, pass neither and
+      let the script resolve the spec dir itself:
 
       ```bash
-      node scripts/list-flows.mjs <target path>
+      # Location row present:
+      node scripts/list-flows.mjs <target path> --location <location>
+      # Location row absent:
+      node scripts/list-flows.mjs <target path>  # e2e-location-default
       ```
 
       This resolves the spec dir the same way `write-specs.mjs` (step 6)
-      actually will — through its scaffold-manifest, then
-      `playwright.config.ts` `testDir`, then `e2e/specs` fallback — so the
-      listing and the eventual write can't disagree about where flows
-      live. It returns `{"specDir", "flows": [{"flowId", "specs":
+      actually will — a present `Location` resolves through its own
+      `playwright.config` `testDir` (a specific `testDir` relocates the specs,
+      a `testDir` of `.` or none falls back to `<location>/specs`), and with
+      no `Location` row both fall back to the Playwright config's `testDir`,
+      or `<config dir>/specs` when the config names none, then `e2e/specs`
+      when no usable config is found (skipped: a config whose `testDir` is
+      an expression, and one with no `testDir` outside the root, a
+      workspace member or `e2e/web` declaring `@playwright/test`) — so the listing and the eventual write can't disagree
+      about where flows live. Passing `--spec-dir <location>/specs` explicitly
+      would hardcode the scaffolder default and point a conform suite whose
+      `testDir` is elsewhere (say `./tests`) at a directory Playwright never
+      runs, so the `Location` row goes through `--location`, which honors that
+      config. It returns `{"specDir", "flows": [{"flowId", "specs":
       [...]}]}`; an empty `flows` array means no flow exists yet, not an
       error.
 
@@ -365,6 +431,23 @@ and 8 each resolve that for themselves once those exist.
         _Traces to: <source>_
         _Why E2E: <reason>_
       ```
+
+      **Give every absence case a control.** A case that asserts a badge,
+      a row or an error is absent also passes when its locator matches
+      nothing, so on its own it proves nothing. Name the positive check the same spec makes with the same
+      locator, usually on a second seeded record that should show the
+      element, on a `_Control:_` line under the case's `_Flow:_` line. The
+      plan example in sub-step 3 shows one.
+
+      **On a bug issue, every case is a bug case or a guard.** A case
+      whose `_Traces to:_` starts with `Bug report` is a **bug case**: it
+      must fail on the code before the fix. Every other case is a
+      **guard**: it must pass before and after. The approval gate approves
+      that split with the rest of the plan. A bug-issue draft with no bug
+      case carries this line under its heading, verbatim:
+
+      > No case traces to the bug report, so nothing runs against the
+      > pre-fix code.
 
    2. **Zero cases.** If the draft ends up with no cases — step 2
       produced no `"e2e"` entries, revision (sub-step 5) dropped every
@@ -402,6 +485,11 @@ and 8 each resolve that for themselves once those exist.
         _Flow: <flowId>_
         _Traces to: <source>_
         _Why E2E: <reason>_
+      - [ ] An archived project shows no "Overdue" badge
+        _Flow: project-details_
+        _Control: an overdue active project, seeded in the same spec, shows the badge through the same locator_
+        _Traces to: AC #2: "archived projects never show as overdue"_
+        _Why E2E: the badge renders from the project API response on the details page_
       ```
 
    4. **Approval gate.** Finalize only on a clear affirmative reply
@@ -469,15 +557,19 @@ and 8 each resolve that for themselves once those exist.
       all-`"in-process"` diff (a backend-only change, a pure refactor) is
       exactly the case this guards.
 
-4. **Boot the app, or attach to it if it's already running.**
+4. **Boot the app, or attach to it if it's already running.** Read the
+   `Location` row of the `### E2E bindings` section in the target's bindings
+   file first — it names the suite dir (e.g. `e2e/web`) whose `.env` holds
+   `E2E_BASE_URL`. Pass it as `--suite-location` on every call below when it
+   is not the default; an absent row means the default and needs no flag.
 
    ```bash
-   node scripts/resolve-app-url.mjs <target path> [--location <rel>]
+   node scripts/resolve-app-url.mjs <target path> [--suite-location <rel>]
    ```
 
-   The app's URL comes from `E2E_BASE_URL` — exported, or set in
-   `e2e/web/.env`. Nothing infers a port from framework defaults any more,
-   so there is no wrong guess to diagnose.
+   The app's URL comes from `E2E_BASE_URL` — exported, or set in the suite's
+   `.env`. Nothing infers a port from framework defaults any more, so there
+   is no wrong guess to diagnose.
 
    - `"running"` — the app is already up. Reuse `url` and skip to step 5.
      **Do not** start a second one, and note that step 9 will have nothing
@@ -488,12 +580,13 @@ and 8 each resolve that for themselves once those exist.
    - `"not-running"` — the URL is correct but nothing is answering. Boot it:
 
      ```bash
-     node scripts/resolve-app-url.mjs <target path> --start [--location <rel>]
+     node scripts/resolve-app-url.mjs <target path> --start [--suite-location <rel>]
      ```
 
      `--start` runs the command in its own process group, writes
-     `.e2e-testing/app.pid`, redirects output to `.e2e-testing/app.log`, and
-     polls `E2E_BASE_URL` until it answers.
+     `.e2e-testing/app.pid`, redirects output to `.e2e-testing/app.log`, adds
+     both to the target repo's `.gitignore` unless a rule already covers
+     them, and polls `E2E_BASE_URL` until it answers.
 
      - `"booted"` — use `url` for step 5. **Record `pid`** and remember that
        step 9 must run, however this flow ends.
@@ -515,44 +608,69 @@ and 8 each resolve that for themselves once those exist.
    session's storage state at *this run's* target, then for each unchecked
    case verify its selectors.
 
-   **Decide the spec structure — once per repo.** Before authoring, read
-   `pom` from the target's repo-root `.e2e-scaffold.json`:
+   **Decide the spec structure — once per repo.** `e2e-setup` settles this
+   at its approval gate and writes the `Convention` row, so a suite
+   scaffolded by the current setup arrives with the row already present.
+   Before authoring, read the `Convention` row of the `### E2E bindings`
+   section in the target's bindings file (`resolveBindingsFile` from the
+   `e2e-setup` skill's `scripts/bindings.mjs`):
 
-   - Key present (`true` or `false`): obey it silently. `true` = Page
-     Objects, `false` = self-contained specs. Never ask.
-   - `--pom` or `--no-pom` passed to this run: use that value and persist it
-     (below), overriding any stored one. This is how a repo flips mode; the
+   - Row present (`pom` or `flat`): obey it silently. `pom` = Page
+     Objects, `flat` = self-contained specs. Never ask.
+   - `--pom` or `--no-pom` passed to this run: use that value and record it
+     (below), overriding any stored row. This is how a repo flips mode; the
      flip applies to the specs this run writes, and leaves existing specs
      alone.
-   - Key absent (undecided) and no flag: ask the human once, a single
+   - Row absent (undecided) and no flag: the fallback for a suite
+     scaffolded before setup wrote the row. Ask the human once, a single
      question — structure generated tests as shared **Page Objects**
      (house-style `selectors`/`page`/`assertion` split under `pages/`), or
      **Self-contained specs** (no page objects; shared setup factored into
      `fixtures/base.ts`)? A non-interactive run with no flag and no stored
-     value defaults to self-contained.
+     row defaults to self-contained.
 
-   Persist the decided value so later runs never re-ask:
-
-   ```bash
-   node scripts/persist-pom.mjs <target path> --pom      # Page Objects
-   node scripts/persist-pom.mjs <target path> --no-pom   # Self-contained
-   ```
+   Record the decided value so later runs never re-ask: upsert the
+   `Convention` row (`| Convention | \`pom\` |` or `| Convention | \`flat\`
+   |`) into the `### E2E bindings` section of the bindings file, under the
+   same idempotency rules as `apptension-sdlc:setup`'s `### Dev flow
+   bindings` section — a heading probe finds the section, an existing row
+   is updated in place, and a missing section is added with this row as
+   its `Convention` value. The agent performs this upsert directly, no
+   script involved.
 
    **Author by that decision:**
 
-   - **Page Objects (`pom: true`).** For each flow this run touches, author
-     the house-style three-file split — see the `playwright-testing-patterns`
-     skill, "Page Object Model, split by responsibility":
-     - `<flowId>.selectors.ts` — locators only, `getByRole` first, declared
-       once as a function of `page`.
-     - `<flowId>.page.ts` — user-facing action verbs on a thin `BasePage`,
-       composing the selectors.
-     - `<flowId>.assertion.ts` — grouped assertions.
-     Pass these in step 6's payload as `pageObjects` entries. Wire the page
-     object through `fixtures/base.ts` at the `// Generated page objects and
-     fixtures plug in here.` seam so each spec receives it as a fixture, and
-     each spec then reads as intent (`await guestList.add(name)`), never
-     re-declaring a locator.
+   - **Page Objects (`pom: true`).** For each page or component the flows
+     this run touches, author the house-style three-file split — see the
+     `playwright-testing-patterns` skill, "Page Object Model, split by
+     responsibility". Name each page by that skill's "Page Object folders"
+     rule. `<ext>` is `ts` or `js`, the suite's language as `write-specs.mjs` detects it. The first
+     of these the suite has decides it: its own `tsconfig.json` (`ts`), the
+     language of its existing specs, then its Playwright config
+     (`playwright.config.ts` is `ts`; `.js`, `.mjs` and `.cjs` are `js`). A
+     suite with none of those is `ts` when the repo root has a
+     `tsconfig.json` or `tsconfig.base.json`, and `js` otherwise.
+     - `pages/<page>/<page>.selectors.<ext>` — locators only, `getByRole`
+       first, declared once as a function of `page`.
+     - `pages/<page>/<page>.page.<ext>` — user-facing action verbs on a thin
+       `BasePage`, composing the selectors. Import `BasePage` from
+       `../base.page`; step 6 writes that file, so it is never a
+       `pageObjects` entry.
+     - `pages/<page>/<page>.assertion.<ext>` — grouped assertions, each
+       method named like a Playwright matcher (`toBeLoaded`), so the suite's
+       missing-assertion lint rule counts `await login.assert.toBeLoaded()`
+       as an assertion.
+     In a `js` suite, write all three as plain JavaScript. Step 7's `--list`
+     loads them as JavaScript, so type syntax such as a typed `page`
+     parameter or an `import type` fails it.
+     A page whose folder already exists is the suite's own. Read its files
+     first, and when a flow needs a selector, action or assertion they lack,
+     add it to that file directly. Pass only new pages in step 6's payload as
+     `pageObjects` entries. Wire each page object through `fixtures/base.ts`
+     at the `// Generated page objects and fixtures plug in here.` seam,
+     importing `../pages/<page>/<page>.page`, so each spec receives it as a
+     fixture, and each spec then reads as intent
+     (`await guestList.add(name)`), never re-declaring a locator.
    - **Self-contained (`pom: false`).** Write no page objects, but still
      remove duplication: any locator or setup preamble a flow's specs share —
      the navigate-then-wait-for-seeded-state opening, a row-by-name locator,
@@ -567,13 +685,18 @@ and 8 each resolve that for themselves once those exist.
      bundled server runs with `--caps=storage`, so that tool is available:
 
      ```bash
-     node scripts/resolve-storage-state.mjs <target path>
+     node scripts/resolve-storage-state.mjs <target path> [--location <rel>]
      ```
 
+     Pass the same `Location` row read in step 3 as `--location` when it is
+     present, so the saved login resolves under the configured suite dir.
+     When the row is absent, pass no `--location` and the script falls back
+     to `e2e/web`.
+
      It prints `{ loaded, filename }`. `filename` is the target's own
-     `e2e/web/.auth/user.json` (written by `setup`) when it exists
+     `<location>/.auth/user.json` (written by `setup`) when it exists
      (`{"loaded": true}`), or an empty logged-out state the script writes
-     into the target's `e2e/web/.auth/logged-out.json` when it does not
+     into the target's `<location>/.auth/logged-out.json` when it does not
      (`{"loaded": false}`) — always a path inside the target's roots, never
      the plugin cache, which the MCP would reject. It reads only the given
      target, so a
@@ -637,6 +760,9 @@ and 8 each resolve that for themselves once those exist.
      Do not rely on description-match to load it — spec generation must
      apply these patterns on every case.
 
+     A case with a `_Control:_` line gets that control in its own spec,
+     asserted through the same locator as the absence check.
+
      **Each case must be isolated** — self-contained, and independent of
      any other case and of a previous run. A case that reads whatever
      happens to be in the database, or leaves state behind for the next
@@ -676,28 +802,41 @@ and 8 each resolve that for themselves once those exist.
        this only after the self-contained shape is ruled out, and say why
        in a one-line comment above the block.
 
-6. **Write the specs.**
+6. **Write the specs.** Pass the same `Location` row read in step 3 as
+   `--location` when it is present, so specs and page objects resolve under
+   the configured suite dir. When the row is absent, pass no `--location`
+   and let the script fall back to the config's `testDir`, or
+   `<config dir>/specs` when the config names none (then `e2e/specs` when no
+   usable config is found):
+   passing `e2e/web` explicitly would override a repo whose `testDir` points
+   elsewhere and write specs where Playwright will not run them.
 
    ```bash
-   echo '<payload>' | node scripts/write-specs.mjs <target path>
+   # Location row present:
+   echo '<payload>' | node scripts/write-specs.mjs <target path> --location <location>
+   # Location row absent:
+   echo '<payload>' | node scripts/write-specs.mjs <target path>  # e2e-location-default
    ```
 
-   Payload shape: `{"ticket": <issueNumber>, "cases": [{"flowId": "<kebab-case flow>", "slug": "<kebab-case-slug>", "title": "<case title>", "content": "<full spec file text>"}], "pageObjects": [{"flowId": "<kebab-case flow>", "role": "selectors|page|assertion", "content": "<full file text>"}]}`.
+   Payload shape: `{"ticket": <issueNumber>, "cases": [{"flowId": "<kebab-case flow>", "slug": "<kebab-case-slug>", "title": "<case title>", "content": "<full spec file text>"}], "pageObjects": [{"page": "<kebab-case page>", "role": "selectors|page|assertion", "content": "<full file text>"}]}`.
    One case per step-5 case, in the same order as the test plan. Each case
    is written to `<specDir>/<flowId>/<slug>.spec.<ext>`. `pageObjects` is
    present only in Page Object mode (`pom: true`) — omit it entirely for
-   self-contained; each entry is written to `<pagesDir>/<flowId>.<role>.<ext>`
-   verbatim, with no provenance comment.
+   self-contained; each entry is written to `<pagesDir>/<page>/<page>.<role>.<ext>`
+   verbatim, with no provenance comment. A payload carrying `pageObjects` also
+   writes `<pagesDir>/base.page.<ext>` from the script's own template (page
+   handle, slug, `goto`) when the suite has none, and leaves an existing one
+   as it is.
 
    `<target path>` is the **repo root** — the same path every other step in
    this skill takes, never the `e2e/web` sub-package. The script resolves the
    spec directory relative to the repo root, so an `e2e/web` target would
    write to `e2e/web/e2e/web/specs/`; it refuses that outright with
    `{"status": "error"}` rather than writing to the doubled path. Pass the
-   repo root and let the script find the sub-package. Don't reach for
-   `--spec-dir` to correct a path that looks wrong — on a repo the setup
-   skill scaffolded, the resolved directory is already the one the generated
-   `playwright.config.ts` collects.
+   repo root and let the script find the sub-package. `--spec-dir` and
+   `--pages-dir` override the section's `Location` outright — reach for them
+   only when a case genuinely needs a directory the section doesn't name,
+   not to correct a path that looks wrong.
 
    Read the JSON report's `results` array. For each entry whose `result`
    starts with `refused-`, tell the human plainly. `refused-invalid-slug`
@@ -710,20 +849,19 @@ and 8 each resolve that for themselves once those exist.
    and it happens outside this skill.
 
    Read `pageObjectResults` the same way when the payload carried
-   `pageObjects`. A `refused-exists` means a page object already sits at that
-   path — flipping to Page Object mode never overwrites an existing file, so
-   tell the human and leave it. `refused-no-pages-dir` means the target has no
-   `pages` dir in its manifest (not a scaffolded Page Object repo);
-   `refused-invalid-role` or `refused-invalid-flow` mean a malformed entry —
-   fix and re-run.
+   `pageObjects`. `exists` means that page object is already in the suite: the
+   script leaves it as it is, and the flow uses it. `refused-invalid-page` or
+   `refused-invalid-role` mean a malformed entry, and nothing was written for
+   it. Fix the entry and re-run. `basePage` reports the base class: `created` on the run
+   that wrote it, `exists` when the suite already had one.
 
    Every created spec carries `// issue:<issueNumber>` as its first line.
    That comment is the committed record of which run produced the file —
-   it survives formatters, and nothing reads it back. This skill now leaves
-   nothing else behind for the target repo's history: the test plan was
-   gitignored when it was written (step 3's Finalize sub-step), and
-   `.e2e-testing/app.log` and `.e2e-testing/app.pid` are transient boot state
-   to add to the target repo's `.gitignore`.
+   it survives formatters, and nothing reads it back. Nothing else this
+   skill writes belongs in the target repo's history. The test plan was
+   gitignored when it was written (step 3's Finalize sub-step), and step
+   4's `--start` gitignores the `.e2e-testing/app.log` and
+   `.e2e-testing/app.pid` it writes.
 
 7. **Validate the generated specs before running them.** The specs from
    step 6 are on disk but unproven — a syntax error or a bad import reads as
@@ -743,32 +881,117 @@ and 8 each resolve that for themselves once those exist.
    each spec module without running it or touching the app, so a load error
    surfaces now instead of as a `not-run` in step 8.
 
+   A clean listing is followed by the suite's own `typecheck` script, once,
+   when the suite has a `tsconfig.json` and that script and is not the repo
+   root. Playwright strips types without checking them, so a spec with a type
+   error loads cleanly under `--list`. The typecheck is what fails it.
+
+   Read `status` first. `validated` carries `results`. Any other status is a
+   report-level stop that carries no `results`, and **stops here**:
+
+   | `status` | Present |
+   |---|---|
+   | `no-playwright` | That the Location row's directory has no `@playwright/test` installed, or, with no row, that no location in the target repo has it. Point the human at the `e2e-setup` skill, or at the Location row when it names the wrong directory |
+   | `ambiguous` | `candidates` and the spec paths verbatim. It arises only with no Location row: each candidate has Playwright and none contains the written specs. Point the human at the `e2e-setup` skill |
+   | `error` | `message` verbatim. It also covers a missing package-manager binary. An empty spec-path list means step 6 wrote no spec: present step 6's report with it, as a fault in this run |
+
+   Apart from an empty spec-path list, each is an infrastructure fault and
+   not a broken spec, and a second invocation returns the same status.
+   Present it once, then run step 9. An empty spec-path list ends the run
+   there, with step 6's report. Otherwise resume once the human reports the
+   cause fixed, as [Resuming after a stop](#resuming-after-a-stop) says.
+
    Read `results`. Each entry's `result` is one of:
 
    | `result` | Meaning |
    |---|---|
-   | `valid` | The spec compiled, its imports resolved, and it appeared in the listing |
-   | `invalid` | The spec failed to load — syntax error or bad import; `error` carries the failure |
-   | `not-listed` | The spec loaded without error but the runner listed no test for it — excluded by the repo's `testMatch`/`testIgnore`, or it defines no test. It would resurface as a `not-run` in step 8, so it gates here too |
+   | `valid` | The spec compiled, its imports resolved, and it appeared in the listing. On a listing that failed on another spec, `valid` means only that no error was traced to this one |
+   | `invalid` | The spec failed to load (syntax error or bad import), or the typecheck named it; `error` carries the failure, or the spec's `tsc` lines. When `--list` fails with output that names no spec, every spec it ran on is `invalid` with that same `error`, and the report carries `stderrTail` |
+   | `not-listed` | The spec loaded but the runner listed no test for it, excluded by the repo's `testMatch`/`testIgnore` or defining no test, so it would resurface as `not-run` in step 8 |
    | `missing` | The given path has no file on disk |
 
-   - **Every entry `valid`** — say so and continue to step 8.
-   - **Any entry not `valid`** — **stop here.** Present each such case: its
-     `specPath`, `title` (from the plan), `result`, and its `error`
-     **verbatim**. A report-wide `stderrTail` may also be present when the
-     failure could not be tied to one spec — a config-level error, say — so
-     surface it too. Then stop, and run step 9 to stop the app this run may
-     have booted.
+   Read `typecheck` too, present whenever the listing was clean:
+
+   | `typecheck.status` | Meaning |
+   |---|---|
+   | `passed` | The suite type-checks |
+   | `failed` | `tsc` reported errors. A requested spec's errors are on its entry as `invalid`. `otherFiles` lists errors in any other file, such as a page object, as `{ file, error }` |
+   | `error` | The script failed without a `tsc` diagnostic, for example `tsc` is not installed; `message` carries the output |
+   | `skipped` | No suite `tsconfig.json`, no `typecheck` script, or the suite is the repo root; `reason` says which |
+
+   - **Every entry `valid`, and `typecheck.status` is `passed` or `skipped`**
+     — say so and continue to step 8.
+   - **Any entry not `valid`, or `typecheck.status` is `failed` or
+     `error`** — **stop here.** Present each such entry's `specPath`,
+     `title` (from the plan) and `result`, plus its `error` **verbatim** on
+     an `invalid` entry, the only kind that carries one. Then present each
+     `otherFiles` entry's `file` and `error`, or the typecheck `message`,
+     verbatim, plus a report-wide `stderrTail` when present. `stderrTail`
+     comes with every failed listing. When every entry that is not
+     `missing` is `invalid` with one identical `error`, the runner may have
+     failed rather than any spec, for example on a Playwright config or
+     install error, so say that rather than naming those specs as broken.
+     Then run step 9 to stop the app this run may have booted.
 
    Do not edit, regenerate, or re-run the spec — the same division of labour
-   as step 8. A fresh `/apptension-e2e-testing:generate` invocation is how
-   the human acts on it once they've decided.
+   as step 8. The human acts on the stop, and the run then resumes as
+   [Resuming after a stop](#resuming-after-a-stop) says. The one exception is
+   the misnamed assertion below.
 
-   The non-`validated` statuses `no-playwright`, `ambiguous` and `error`
-   each stop the flow and mean exactly what they do in step 8 — `error`
-   here also covers a missing package-manager binary or an empty spec-path
-   list, which are infrastructure, not a broken spec. Run step 9 on each of
-   those exit paths too.
+   Once that gate passes, read `lint`. The suite's own linter ran over the
+   requested specs: ESLint when the suite has a flat ESLint config, Biome
+   when it has a `biome.json` or `biome.jsonc` and no flat ESLint config.
+
+   | `lint.status` | Meaning |
+   |---|---|
+   | `passed` | No findings |
+   | `findings` | `findings` lists each one as `{ file, line, ruleId, severity, message }` |
+   | `error` | The linter printed no JSON report, for example a config that fails to load; `message` carries the output |
+   | `skipped` | The suite has neither a flat ESLint config nor a Biome config; `reason` says so |
+
+   A missing-assertion finding also carries `cause`, read from the flagged
+   test's body. Its `ruleId` is `playwright/expect-expect` under ESLint and
+   `plugin/expect-assertion` under Biome. Route it by that `cause`:
+
+   - **`misnamed-assertion`** — the test calls `<page>.assert.<name>()`
+     with a `<name>` outside `^to[A-Z]`, and `methods` lists those names,
+     such as `["loaded"]`. Rename each method in `pages/<page>/<page>.assertion.<ext>`,
+     where `<ext>` is the extension of the spec file, to a matcher-style
+     name (`toBeLoaded`) and update every call site
+     under the suite, then run `validate-specs.mjs` again over the same
+     spec paths. **One attempt.** If the second report still carries a
+     missing-assertion finding, or fails the gate above, stop and present it
+     as below.
+   - **`no-assertion`** — the test makes no `.assert.` call. Stop. Present
+     the finding's `file`, `line` and `message` verbatim, then run step 9.
+
+   Every other finding, and a `lint.status` of `error`, continues to step 8
+   and goes verbatim in the report the run ends on, however step 8 ends it.
+   `skipped` needs no mention.
+
+   Then read `assertions`, present whenever the listing was clean. The
+   script read each spec's matcher calls:
+
+   | `assertions.status` | Meaning |
+   |---|---|
+   | `passed` | Every spec with a matcher has at least one positive one |
+   | `warnings` | `warnings` lists each spec as `{ specPath, rule, message }`. `rule` is `absence-only`. Every matcher in the spec is `toHaveCount(0)`, `not.toBeVisible()` or `toBeHidden()`, so it also passes when its locator matches nothing |
+
+   A Page Object assertion named like a matcher counts as positive, since
+   the script does not read its body. A warning continues to step 8 and
+   goes verbatim in the report the run ends on, the same as a lint finding.
+   It names a spec missing the control step 3 requires.
+
+   ### Resuming after a stop
+
+   Every stop in this step and in step 8 leaves the written specs on disk,
+   and a fresh `generate` run would refuse them in step 6 as
+   `refused-exists`. So once the human reports the cause fixed, resume over
+   the same spec paths: boot the app as step 4 does, then run steps 7 to 9.
+   On a bug issue step 8 runs the pre-fix run again, so a stop there
+   resumes the same way.
+   Leave out any spec the human deleted. An empty spec-path list is the one
+   stop with nothing to resume, because step 6 wrote no spec.
 
 8. **Run the generated specs and gate on the result.** The app from step 4
    must still be running — these specs drive it.
@@ -822,40 +1045,81 @@ and 8 each resolve that for themselves once those exist.
    step 7 — which is why a caller reusing these flags outside this skill must
    run `validate-specs.mjs` before `run-specs.mjs`, not instead of it.
 
-   - **Every entry `passed` or `filtered`** — say so and finish. The flow
-     completes normally; no gate. Name any `filtered` entry as excluded by
-     the flag, never as passing: it did not verify anything, it was not
-     asked to.
+   - **Every entry `passed` or `filtered`** — say so. Name any `filtered`
+     entry as excluded by the flag, never as passing: it did not verify
+     anything, it was not asked to. On a bug issue whose plan has a bug
+     case and every entry `passed`, read
+     [references/pre-fix-run.md](references/pre-fix-run.md) and run it
+     before step 9: it runs every spec against the pre-fix commit and
+     gates on bug cases failing there. On such a bug issue, a `filtered`
+     entry never ran on the fix, so the pre-fix gate has nothing to
+     compare it with: report the run as inconclusive and stop. Every other
+     run finishes here, with no gate.
    - **Any entry neither `passed` nor `filtered`** — **stop here.** Present each such case:
-     its `specPath`, `title` (from the plan), `result`, and its
-     `failingTest` and `error` **verbatim**. Then stop. `failingTest` and
-     `error` exist only for `flaky`, `failed`, and `skipped` — they're
+     its `specPath`, `title` (from the plan) and `result`, plus its
+     `failureCount` and `failures` list **verbatim** where it carries them.
+     Then stop. `failureCount` and
+     `failures` exist only for `flaky`, `failed`, and `skipped` — they're
      absent entirely, not empty, for `missing`, `not-run`, and
      `filtered`. A `not-run`
      case may also carry `reportErrors` and `stderrTail` on the overall
      report when the runner produced no per-case detail at all.
 
-     Each such case may also carry an `artifacts` array — the on-disk paths
-     Playwright already wrote for it, each an object with a `name` (`trace`,
-     `screenshot`, `video`) and a `path`. Name each path for the case it
-     belongs to so the human can open the evidence. The key is absent when
-     the run captured none. Also name the overall report's `htmlReport` path
-     once — the HTML report covering the whole run — so it can be opened with
-     `npx playwright show-report <path>`. Surface artifacts only for the
-     not-`passed` cases; do not list them for a case that passed.
+     `failureCount` is the number of tests that ended with the case's
+     `result`, one per test per project, so for a `failed` case it matches
+     Playwright's failed-test count. `failures` groups them: each entry is
+     one test failing one way, carrying its `title` (enclosing `describe`
+     titles first, joined with ` › `), `location` (the test's declaration),
+     `errorLocation` (where the first error was thrown) and `specFrame`
+     (the first spec-file line in that error's stack), each present only
+     when the runner reported it, `error`, and the `projects` it failed on. A spec failing identically on eight
+     projects is one entry naming all eight, and the projects are often the
+     pattern the human needs, such as every mobile project failing and no
+     desktop one. Present every entry with its projects. A project is `null`
+     when the target repo's Playwright reports none.
 
-     A failing case may also carry `networkFailures` — an array of
+     An entry may also carry an `artifacts` array — the on-disk paths
+     Playwright already wrote for it, each an object with a `project`, a
+     `name` (`trace`, `screenshot`, `video`) and a `path`. Name each path for
+     the entry and project it belongs to so the human can open the evidence.
+     The key is absent when the run captured none. Also name the overall
+     report's `htmlReport` path once — the HTML report covering the whole
+     run — so it can be opened with `npx playwright show-report <path>`.
+     A run where every spec is `missing` ran nothing and carries no
+     `htmlReport`, so name it only when the result has one.
+
+     An entry may also carry `networkFailures` — an array of
      `{ method, url, status }` for each response of status 400 or more seen
-     while it ran. Surface it verbatim for the not-`passed` cases: it is usually
-     what explains the failure the artifacts only show the symptom of (the
-     `POST` behind a dead button returning 500). The key is absent when there
-     was nothing to report, and never present on a `passed` case.
+     while it ran. Surface it verbatim: it is usually what explains the
+     failure the artifacts only show the symptom of (the `POST` behind a
+     dead button returning 500). The key is absent when there was nothing
+     to report.
+
+     An entry may also carry `appLog` — the lines the app wrote to its boot
+     log while the case ran, newest kept. Surface it: it holds the
+     server-side stack trace behind the failure the browser signals only
+     show the front of. It is captured only when the run used a single
+     worker, since parallel workers share one log; a case run in parallel
+     carries a report annotation naming that reason instead. The key is
+     absent when there was nothing to report.
+
+     An entry may also carry `sessionExpired` — `{ authMode, hint }`, set
+     when the test started logged in and ended on the `E2E_LOGIN_URL` page.
+     Surface the `hint` verbatim: it names the likely cause (a lost session,
+     for example a backend that rotates refresh tokens) and the setting that
+     addresses it. It is a diagnosis attached by the suite's fixture and
+     leaves the result as it is. The key is absent when the test kept its
+     session.
+
+     `networkFailures`, `appLog` and `sessionExpired` come from the first
+     project in the entry's `projects`: each project ran separately, and
+     merging their evidence would mix runs.
 
      Do not diagnose whether the case is a bad test or a real bug it caught.
      Do not regenerate, discard, edit, or re-run it. What happens next is
-     entirely the human's call — tell them a
-     fresh `/apptension-e2e-testing:generate` invocation is how they'd act on it once they've
-     decided. Presenting the result *is* the whole of this step's job.
+     entirely the human's call. Once they have acted on it, the run resumes
+     as [Resuming after a stop](#resuming-after-a-stop) says. Presenting the
+     result *is* the whole of this step's job.
 
    Non-`ran` statuses each stop the flow too, and each says something
    different:
@@ -863,8 +1127,10 @@ and 8 each resolve that for themselves once those exist.
    - `no-playwright` — no location in the target repo has `@playwright/test`
      installed. Point the human at the `e2e-setup` skill.
    - `ambiguous` — several locations have Playwright and none of them
-     contains the specs. Present `candidates`, then re-run with
-     `--location <chosen path>`.
+     contains the specs. It arises only with no Location row. Present
+     `candidates` and the spec paths verbatim, point the human at the
+     `e2e-setup` skill, and stop. Do not re-run with a chosen `--location`:
+     an explicit location skips the check that it contains the specs.
    - `report-unreadable` — the runner produced no parseable JSON report.
      Show `stderrTail`; this is usually a Playwright config or install
      problem in the target repo, not a test failure.
@@ -875,18 +1141,27 @@ and 8 each resolve that for themselves once those exist.
      `E2E_RUN_SPECS_TIMEOUT_MS` env var.
    - `error` — show `message`. Also covers an empty spec-path list.
 
+   Present each once, then run step 9, and resume as
+   [Resuming after a stop](#resuming-after-a-stop) says once the human
+   reports the cause fixed.
+
 9. **Stop the app this run started.**
 
    ```bash
-   node scripts/resolve-app-url.mjs <target path> --stop
+   node scripts/resolve-app-url.mjs <target path> --stop  # e2e-location-default
    ```
 
    Run this after step 7 or step 8 has reported its result — on **every**
    exit path, including the ones that stop for the human: any `invalid`
-   spec from step 7, any non-`passed` case from step 8, and each of
-   `no-playwright`, `ambiguous`, `report-unreadable`, `timed-out` and
-   `error`. A run that gates still has to leave the machine clean, and step
-   7 gates while the app booted in step 4 is still up.
+   spec from step 7, any non-`passed` case from step 8, a pre-fix run
+   stop, and each of `no-playwright`, `ambiguous`, `report-unreadable`,
+   `timed-out` and `error`. A run that gates still has to leave the machine
+   clean, and step 7 gates while the app booted in step 4 is still up.
+
+   The pre-fix run stops the fix app at its step 2 and tears down its own
+   app and worktree, so after a pre-fix run that got that far this reports
+   `"not-running"`. A pre-fix run that stopped at its step 1 left the fix
+   app up, and this reports `"stopped"`.
 
    Read the JSON:
 
@@ -925,8 +1200,16 @@ one directory, with `.e2e-testing/generated-*.json` ledgers beside them. Run
 this once, per repo, before the next `generate`.
 
 ```bash
-node scripts/migrate-specs.mjs <target path>
+node scripts/migrate-specs.mjs <target path> [--location <rel>]
 ```
+
+Pass `--location` when the `### E2E bindings` Location row names a suite
+outside the default `e2e/web`, so the migration reads and moves specs in
+the suite's resolved spec dir — its own `playwright.config` `testDir` when
+that names a sub-directory, else `<location>/specs`. With the row absent,
+omit it and the spec dir follows the Playwright config's `testDir`, landing
+on `e2e/specs` only when the repo has no config. Pass it on every
+`migrate-specs.mjs` call in this section, `--apply` included.
 
 It touches nothing and reports three lists:
 
@@ -943,7 +1226,7 @@ teaches a flow, and its leading-segment siblings follow — a `checkout` flow
 named once maps every `checkout-*.spec.ts`.
 
 ```bash
-node scripts/migrate-specs.mjs <target path> --map checkout-guest.spec.ts=checkout --apply
+node scripts/migrate-specs.mjs <target path> [--location <rel>] --map checkout-guest.spec.ts=checkout --apply
 ```
 
 `--apply` refuses while anything is still `unmapped` and moves nothing —
@@ -953,13 +1236,13 @@ history.
 The ledgers are a separate, explicit act:
 
 ```bash
-node scripts/migrate-specs.mjs <target path> --apply --delete-ledgers
+node scripts/migrate-specs.mjs <target path> [--location <rel>] --apply --delete-ledgers
 ```
 
 `--apply` alone names them and leaves them. Ask the human before passing
-`--delete-ledgers`; never pass it on your own initiative. The repo-root
-`.e2e-scaffold.json` is not a ledger and is never touched — it belongs to the
-`e2e-setup` skill.
+`--delete-ledgers`; never pass it on your own initiative. The `### E2E
+bindings` section in the bindings file is not a ledger and is never
+touched by this migration — it belongs to the `e2e-setup` skill.
 
 ## Why local diff first, PR as fallback
 
@@ -969,9 +1252,16 @@ matches how this skill is actually invoked: mid-implementation, before a
 PR exists, when the only diff worth reading is whatever's sitting on the
 current branch. `gh pr diff` is purely a fallback, for the "standalone"
 case — running this from a checkout with no local divergence from the
-base branch, where the issue nonetheless already has a PR open
-elsewhere. Local diff wins whenever it finds anything; the PR is only
-consulted once the local diff comes back empty or errors out.
+base branch, where the issue already has a PR. Local diff wins whenever it
+finds anything; the PR is only consulted once the local diff comes back
+empty or errors out.
+
+The PR supplies the file list, never the code under test: steps 4 to 8
+boot and run this checkout, so the run stops at step 1 unless `HEAD`
+contains the PR's code, rather than plan cases for the fix and run them
+against code without it. For an open PR that is its head commit, and for
+a merged PR its merge commit. A PR closed without merging never reached
+the base branch, so it stops at step 1 too.
 
 ## How the base branch is detected
 
@@ -1004,11 +1294,10 @@ real API, and a real redirect, and it drove the one destructive action in
 this flow — deleting a candidate case. The scriptable question and the
 useful one were not the same question.
 
-There is also no stable contract to script against yet: the `## Testing
-guide` section this step reads is written by a not-yet-built dev-flow
-step, whose own format is still undecided. A parser today would target a
-guess; prose gets re-read by the agent against whatever's actually there
-once that step ships.
+There is also no format to script against. The `## Testing guide`
+section is prose a human typed on the ticket, in whatever shape they
+typed it; no step generates it, so there is no schema a parser could
+target. The agent re-reads whatever is actually there.
 
 ## Why the test plan needs explicit approval
 
@@ -1036,6 +1325,11 @@ evidence in the second case; "fixing" the spec until it passes would hide
 the bug outright. So the plugin reports and stops. Bug triage is out of
 scope for this plugin, deliberately.
 
+Triage belongs to `triage-e2e-run`, which a caller invokes after this
+report. It needs one fact this skill cannot assume: that the diff under
+test is the caller's own unpushed work. `implement-issue` step 8 states it,
+and routes what the triage hands back.
+
 `skipped`, `missing`, and `not-run` gate for the same reason as `failed`,
 even though none of them is a failing test: in all three the spec did not
 actually verify anything, and reporting that as a pass is the exact failure
@@ -1049,3 +1343,23 @@ flow on exactly the specs the flag was passed to skip. That is also why the
 top-level-error carve-out exists: it is the line between "the caller
 excluded this" and "this failed to load", and without it the flag would
 launder a genuine breakage into a clean run.
+
+## Why bug specs run against the pre-fix code
+
+A spec that passes on the fix shows the fixed behavior works. It does not
+show the spec would have caught the bug: a spec asserting something the fix
+never changed passes on both sides, and step 8 alone reads that as done.
+The pre-fix run is the one check that can tell. A bug case has to go red on
+the code before the fix and green on the fix.
+
+It reports and stops for the same reason step 8 does. A bug case that
+passes on the pre-fix code either asserts the wrong thing or tests a bug
+that does not reproduce in a browser. Editing the spec until it goes red
+before the fix tends to find a spec that fails for an unrelated reason,
+which hides the first case behind a false catch.
+
+A failure in setup is inconclusive rather than a catch. When seeding breaks
+because the fix changed the schema, or a fixture calls an endpoint the
+pre-fix app lacks, the case goes red without ever reaching its assertion.
+That red says the pre-fix app could not run the case, not that the case
+detects the bug.
